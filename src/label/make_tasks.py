@@ -28,7 +28,7 @@ TYPE_RU = {"manhole": "колодец", "street_lamp": "опора", "street_cab
 
 
 def label_config(tax: dict) -> str:
-    colors = {"manhole": "#e6194b", "pole": "#3cb44b", "cabinet": "#4363d8"}
+    colors = {"manhole": "#e6194b", "pole": "#3cb44b", "cabinet": "#4363d8", "aerial_equipment": "#911eb4"}
     labels = "\n".join(
         f'    <Label value="{k}" hint={quoteattr(v)} background="{colors.get(k, "#f58231")}" hotkey="{i}"/>'
         for i, (k, v) in enumerate(tax["object_types"].items(), 1))
@@ -38,7 +38,7 @@ def label_config(tax: dict) -> str:
   <Image name="image" value="$image" zoom="true" zoomControl="true" rotateControl="false"/>
   <RectangleLabels name="object" toName="image" strokeWidth="2">
 {labels}
-    <Label value="other" hint="другой объект инфраструктуры связи" background="#f58231"/>
+    <Label value="other" hint="другой объект инфраструктуры связи (ввод в здание, КИП-столбик…) — подпиши в комментарии" background="#f58231" hotkey="{len(tax['object_types']) + 1}"/>
   </RectangleLabels>
   <View visibleWhen="region-selected">
     <Header value="Состояние выделенного объекта"/>
@@ -72,7 +72,7 @@ def to_prediction(objs: list[dict], model: str) -> dict:
             continue
         rid = f"p{k}"
         common = {"id": rid, "to_name": "image", "original_width": W, "original_height": H, "image_rotation": 0}
-        label = o["type"] if o["type"] in ("manhole", "pole", "cabinet") else "other"
+        label = o["type"] if o["type"] in ("manhole", "pole", "cabinet", "aerial_equipment") else "other"
         result.append({**common, "from_name": "object", "type": "rectanglelabels", "value": {
             "x": 100 * x1 / W, "y": 100 * y1 / H, "width": 100 * (x2 - x1) / W, "height": 100 * (y2 - y1) / H,
             "rotation": 0, "rectanglelabels": [label]}})

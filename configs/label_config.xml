@@ -3,9 +3,10 @@
   <Image name="image" value="$image" zoom="true" zoomControl="true" rotateControl="false"/>
   <RectangleLabels name="object" toName="image" strokeWidth="2">
     <Label value="manhole" hint="кабельный колодец / люк (круглая или прямоугольная крышка в покрытии; не ливневая решётка)" background="#e6194b" hotkey="1"/>
-    <Label value="pole" hint="опора: фонарный столб, опора двойного назначения с кабелями/оборудованием, столб линии" background="#3cb44b" hotkey="2"/>
-    <Label value="cabinet" hint="распределительный шкаф / короб связи или электрики на улице или на опоре" background="#4363d8" hotkey="3"/>
-    <Label value="other" hint="другой объект инфраструктуры связи" background="#f58231"/>
+    <Label value="pole" hint="опора: фонарный столб, опора двойного назначения, столб линии связи или ЛЭП" background="#3cb44b" hotkey="2"/>
+    <Label value="cabinet" hint="уличный шкаф: связи, электрики, управления светофорами; на земле или на опоре" background="#4363d8" hotkey="3"/>
+    <Label value="aerial_equipment" hint="оборудование связи на опоре/фасаде: оптическая муфта (чёрный цилиндр/купол), запас кабеля в кольцах, короб" background="#911eb4" hotkey="4"/>
+    <Label value="other" hint="другой объект инфраструктуры связи (ввод в здание, КИП-столбик…) — подпиши в комментарии" background="#f58231" hotkey="5"/>
   </RectangleLabels>
   <View visibleWhen="region-selected">
     <Header value="Состояние выделенного объекта"/>
@@ -23,8 +24,12 @@
       <Choice value="pole_tilted" hint="опора: заметно наклонена"/>
       <Choice value="pole_damaged" hint="опора: коррозия, разрушение основания или корпуса, повреждённая конструкция"/>
       <Choice value="cables_damaged" hint="опора: провисшие, оборванные, спутанные или свисающие кабели"/>
-      <Choice value="equipment_open" hint="шкаф или короб на опоре: открыта или сорвана дверца/крышка"/>
+      <Choice value="equipment_open" hint="шкаф или короб: открыта или сорвана дверца/крышка"/>
       <Choice value="cabinet_damaged" hint="шкаф: вмятины, разрушение корпуса, сильная ржавчина, вандализм"/>
+      <Choice value="cabinet_tilted" hint="шкаф: наклонён, сдвинут с цоколя"/>
+      <Choice value="cables_exposed" hint="шкаф/короб/ввод: из корпуса торчат кабели, оголённый кабель"/>
+      <Choice value="cable_coil_unwound" hint="запас кабеля размотался («борода»), висит ниже нормы"/>
+      <Choice value="equipment_fallen" hint="муфта или короб сорваны с крепления, висят на кабеле или упали"/>
       <Choice value="other_damage" hint="другое — опиши в комментарии"/>
     </Choices>
     <TextArea name="note" toName="image" perRegion="true" placeholder="комментарий (необязательно)" maxSubmissions="1"/>
