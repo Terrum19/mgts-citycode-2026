@@ -1,0 +1,47 @@
+# Типы объектов и виды повреждений. На финале меняем ТОЛЬКО этот блок на список МГТС.
+[taxonomy]
+object_types = { manhole = "кабельный колодец / люк (круглая или прямоугольная крышка в покрытии; не ливневая решётка)", pole = "опора: фонарный столб, опора двойного назначения с кабелями/оборудованием, столб линии", cabinet = "распределительный шкаф / короб связи или электрики на улице или на опоре" }
+
+[taxonomy.damage]
+cover_broken = "колодец: крышка сломана — дыры, проломы, раскол"
+cover_missing = "колодец: крышки нет, колодец открыт"
+cover_open_or_shifted = "колодец: крышка сдвинута, приподнята, стоит ребром или лежит рядом"
+ring_or_surface_damaged = "колодец: разрушено покрытие или кольцо вокруг, крышка просела или выступает"
+pole_tilted = "опора: заметно наклонена"
+pole_damaged = "опора: коррозия, разрушение основания или корпуса, повреждённая конструкция"
+cables_damaged = "опора: провисшие, оборванные, спутанные или свисающие кабели"
+equipment_open = "шкаф или короб на опоре: открыта или сорвана дверца/крышка"
+cabinet_damaged = "шкаф: вмятины, разрушение корпуса, сильная ржавчина, вандализм"
+
+# Варианты = модель + endpoint. Ключ берётся из переменной окружения / .env по имени key_env.
+[variants.qwen235]
+base_url = "https://openrouter.ai/api/v1"
+model = "qwen/qwen3-vl-235b-a22b-instruct"
+key_env = "OPENROUTER_API_KEY"
+workers = 6
+
+[variants.gemma31_free]
+base_url = "https://openrouter.ai/api/v1"
+model = "google/gemma-4-31b-it:free"
+key_env = "OPENROUTER_API_KEY"
+workers = 2
+
+[variants.nemotron_free]
+base_url = "https://openrouter.ai/api/v1"
+model = "nvidia/nemotron-3.5-super-vl:free"
+key_env = "OPENROUTER_API_KEY"
+workers = 2
+
+# Локальный Qwen (вариант 2a): mlx_vlm.server на M4
+[variants.qwen8b_local]
+base_url = "http://localhost:8080/v1"
+model = "mlx-community/Qwen3-VL-8B-Instruct-4bit"
+key_env = ""
+workers = 1
+
+# та же Gemma, но платная (бесплатный пул часто отдаёт 429)
+[variants.gemma31]
+base_url = "https://openrouter.ai/api/v1"
+model = "google/gemma-4-31b-it"
+key_env = "OPENROUTER_API_KEY"
+workers = 6

@@ -1,0 +1,36 @@
+<View>
+  <Header value="Цель съёмки: $target_ru (по OSM; на кадре может быть не видна — размечай всё, что видно)"/>
+  <Image name="image" value="$image" zoom="true" zoomControl="true" rotateControl="false"/>
+  <RectangleLabels name="object" toName="image" strokeWidth="2">
+    <Label value="manhole" hint="кабельный колодец / люк (круглая или прямоугольная крышка в покрытии; не ливневая решётка)" background="#e6194b" hotkey="1"/>
+    <Label value="pole" hint="опора: фонарный столб, опора двойного назначения с кабелями/оборудованием, столб линии" background="#3cb44b" hotkey="2"/>
+    <Label value="cabinet" hint="распределительный шкаф / короб связи или электрики на улице или на опоре" background="#4363d8" hotkey="3"/>
+    <Label value="other" hint="другой объект инфраструктуры связи" background="#f58231"/>
+  </RectangleLabels>
+  <View visibleWhen="region-selected">
+    <Header value="Состояние выделенного объекта"/>
+    <Choices name="status" toName="image" perRegion="true" choice="single-radio" required="true" showInline="true">
+      <Choice value="ok" hint="исправен"/>
+      <Choice value="bad" hint="есть признак неудовлетворительного состояния"/>
+      <Choice value="unclear" hint="не видно, чтобы решить"/>
+    </Choices>
+    <Choices name="damage" toName="image" perRegion="true" choice="single-radio"
+             visibleWhen="choice-selected" whenTagName="status" whenChoiceValue="bad">
+      <Choice value="cover_broken" hint="колодец: крышка сломана — дыры, проломы, раскол"/>
+      <Choice value="cover_missing" hint="колодец: крышки нет, колодец открыт"/>
+      <Choice value="cover_open_or_shifted" hint="колодец: крышка сдвинута, приподнята, стоит ребром или лежит рядом"/>
+      <Choice value="ring_or_surface_damaged" hint="колодец: разрушено покрытие или кольцо вокруг, крышка просела или выступает"/>
+      <Choice value="pole_tilted" hint="опора: заметно наклонена"/>
+      <Choice value="pole_damaged" hint="опора: коррозия, разрушение основания или корпуса, повреждённая конструкция"/>
+      <Choice value="cables_damaged" hint="опора: провисшие, оборванные, спутанные или свисающие кабели"/>
+      <Choice value="equipment_open" hint="шкаф или короб на опоре: открыта или сорвана дверца/крышка"/>
+      <Choice value="cabinet_damaged" hint="шкаф: вмятины, разрушение корпуса, сильная ржавчина, вандализм"/>
+      <Choice value="other_damage" hint="другое — опиши в комментарии"/>
+    </Choices>
+    <TextArea name="note" toName="image" perRegion="true" placeholder="комментарий (необязательно)" maxSubmissions="1"/>
+  </View>
+  <Choices name="frame" toName="image" choice="multiple" showInline="true">
+    <Choice value="bad_frame" hint="размыто / засвечено / ничего не разобрать"/>
+    <Choice value="target_not_visible" hint="объекта, на который целились, на кадре нет"/>
+  </Choices>
+</View>
