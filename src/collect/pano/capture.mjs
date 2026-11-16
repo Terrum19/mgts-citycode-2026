@@ -28,7 +28,12 @@ const RENDER_WAIT_MS = Number(args.wait ?? 5000);
 // домен, под которым Chrome открывает локальную страницу (должен быть в Referer-ограничениях ключа)
 const HOST = args.host ?? 'citycode.test';
 
-const key = (readFileSync(join(ROOT, '.env'), 'utf8').match(/^YANDEX_MAPS_API_KEY_PANORAMS=(.*)$/m) || [])[1]
+const ENV = join(ROOT, '.env');
+if (!existsSync(ENV)) {
+  console.error('Нет файла .env в корне проекта. Создай его со строкой:\nYANDEX_MAPS_API_KEY_PANORAMS=твой_ключ\n(подробности: docs/collect_panoramas.md)');
+  process.exit(1);
+}
+const key = (readFileSync(ENV, 'utf8').match(/^YANDEX_MAPS_API_KEY_PANORAMS=(.*)$/m) || [])[1]
   ?.trim().replace(/^['"]|['"]$/g, '');
 if (!key) { console.error('YANDEX_MAPS_API_KEY_PANORAMS не найден в .env'); process.exit(1); }
 
@@ -81,13 +86,17 @@ const CHROME = args.chrome ?? process.env.PANO_CHROME ?? [
   'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
   `${process.env.LOCALAPPDATA}\\Google\\Chrome\\Application\\chrome.exe`,
 ].find(p => p && existsSync(p));
-if (!CHROME) { console.error('Не нашёл Chrome/Chromium — укажи путь через --chrome'); process.exit(1); }
+if (!CHROME || !existsSync(CHROME)) {
+  console.error(`Не нашёл Chrome/Chromium${CHROME ? ` по пути ${CHROME}` : ''} — укажи путь через --chrome "/путь/к/chrome"`);
+  process.exit(1);
+}
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${port}`, '--window-size=1280,800',
   `--host-resolver-rules=MAP ${HOST} 127.0.0.1`,
   '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist',
   `--user-data-dir=${join(OUT, '.chrome-profile')}`, 'about:blank',
 ], { stdio: 'ignore' });
+chrome.on('error', e => { console.error(`Не удалось запустить Chrome (${CHROME}): ${e.message}`); process.exit(1); });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 let wsUrl;
