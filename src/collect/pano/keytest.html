@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>Проверка ключа Яндекс Карт</title>
+<style>
+  body{font:15px/1.4 system-ui,sans-serif;margin:16px;max-width:900px}
+  input{width:100%;padding:8px;font:inherit;box-sizing:border-box}
+  button{margin-top:8px;padding:8px 16px;font:inherit}
+  #log{white-space:pre-wrap;background:#f4f4f4;padding:8px;margin-top:12px;min-height:3em}
+  #p{width:100%;height:420px;margin-top:12px;background:#ddd}
+</style></head>
+<body>
+<h3>Проверка ключа JS API Яндекс Карт</h3>
+<p>Открывать через <code>http://localhost:8000/keytest.html</code> (см. инструкцию в README), а не двойным кликом по файлу.</p>
+<input id="key" placeholder="ключ JavaScript API">
+<button onclick="run()">Проверить</button>
+<div id="log"></div>
+<div id="p"></div>
+<script>
+const log = t => document.getElementById('log').textContent += t + '\n';
+function run() {
+  const key = document.getElementById('key').value.trim();
+  if (!key) return log('Вставь ключ');
+  const origWarn = console.warn;
+  console.warn = (...a) => { log('Яндекс: ' + a.join(' ')); origWarn(...a); };
+  const s = document.createElement('script');
+  s.src = 'https://api-maps.yandex.ru/2.1/?lang=ru_RU&apikey=' + encodeURIComponent(key);
+  s.onerror = () => log('Не удалось загрузить API (сеть?)');
+  s.onload = () => ymaps.ready(() => {
+    log('API загружено, ищу панораму у Красной площади…');
+    ymaps.panorama.locate([55.7539, 37.6208]).done(ps => {
+      if (!ps.length) return log('Панорама не найдена (но ключ работает)');
+      log('✅ КЛЮЧ РАБОТАЕТ: панорама найдена, показываю ниже');
+      new ymaps.panorama.Player('p', ps[0], {direction: [200, 0]});
+    }, e => log('❌ Ошибка поиска панорамы: ' + (e && (e.message || e)) + ' — ключ не принят'));
+  });
+  document.head.appendChild(s);
+}
+</script></body></html>
