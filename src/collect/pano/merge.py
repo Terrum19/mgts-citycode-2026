@@ -30,8 +30,9 @@ def main() -> None:
         with tempfile.TemporaryDirectory() as tmp, tarfile.open(archive) as tar:
             # только ожидаемые файлы: meta.jsonl и *.jpg без путей (защита от ../ в архиве)
             members = [m for m in tar.getmembers()
-                       if m.isfile() and "/" not in m.name and (m.name == "meta.jsonl" or m.name.endswith(".jpg"))]
-            tar.extractall(tmp, members=members)
+                       if m.isfile() and "/" not in m.name and not m.name.startswith("._")
+                       and (m.name == "meta.jsonl" or m.name.endswith(".jpg"))]
+            tar.extractall(tmp, members=members, filter="data")
             for r in read_meta(Path(tmp) / "meta.jsonl"):
                 if r["id"] in known:
                     continue

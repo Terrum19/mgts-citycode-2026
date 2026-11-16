@@ -20,5 +20,5 @@ if (!existsSync(meta)) { console.error('Нечего паковать: нет da
 const files = readFileSync(meta, 'utf8').split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(r => r.file);
 const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-');
 const out = `panoramas_${name}_${stamp}.tar.gz`;
-execFileSync('tar', ['-czf', out, '-C', join(ROOT, dir), 'meta.jsonl', ...files.map(r => r.file)], { cwd: ROOT, stdio: 'inherit' });
+execFileSync('tar', ['-czf', out, '-C', join(ROOT, dir), 'meta.jsonl', ...files.map(r => r.file)], { cwd: ROOT, stdio: 'inherit', env: { ...process.env, COPYFILE_DISABLE: '1' } });  // macOS: без служебных ._ файлов
 console.log(`${files.length} кадров -> ${out}\nОтправь этот файл координатору (Telegram/диск).`);
