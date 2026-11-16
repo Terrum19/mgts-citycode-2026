@@ -1,0 +1,17 @@
+# данные и артефакты
+data/
+weights/
+runs/
+*.pt
+*.safetensors
+*.gguf
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# секреты
+.env
