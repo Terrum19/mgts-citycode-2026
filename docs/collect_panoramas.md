@@ -48,7 +48,7 @@ node src/collect/pano/pack.mjs --name petya           # упаковать ре�
 | Сообщение | Что делать |
 |---|---|
 | `YANDEX_MAPS_API_KEY_PANORAMS не найден в .env` | Проверь шаг 4: файл `.env` в корне проекта, имя переменной точно такое |
-| `Invalid API key` / `locate_error scriptError` | Ключ ещё не активен (подожди 15 мин) или запрос идёт через VPN (шаг 5). Проверить: `node src/collect/pano/capture.mjs --quota manhole=1 --debug` |
+| `Invalid API key` / `locate_error scriptError` / `ERR_BLOCKED_BY_ORB` | Яндекс не принял ключ. По порядку: 1) в Referer есть **`citycode.test`** (одного `localhost` мало); 2) ограничение по IP пустое; 3) прошло 15 мин после создания **и после каждой правки** ключа; 4) VPN выключен или Яндекс идёт напрямую; 5) ключ в `.env` без пробелов и кавычек. Проверка: открой в браузере `https://api-maps.yandex.ru/2.1/?lang=ru_RU&apikey=ТВОЙ_КЛЮЧ` и найди `apikeyValid`: `false` — пункты 2–5; `true`, а скрипт падает — пункт 1 или VPN включён для терминала, но не для браузера |
 | `Не нашёл Chrome/Chromium` | Укажи путь: `--chrome "/путь/к/chrome"` |
 | `no_pano` / `too_far` у части точек | Нормально: рядом с объектом нет панорамы, точка помечается и больше не запрашивается |
 
