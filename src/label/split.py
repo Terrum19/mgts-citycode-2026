@@ -64,9 +64,11 @@ def main() -> None:
         else:
             part = "dev" if dev[t] < DEV_SHARE * (seen[t] + len(files)) else "test"
         seen[t] += len(files)
-        dev[t] += len(files) * (part == "dev")
+        dev[t] += sum(old.get(f, part) == "dev" for f in files)
         for f in files:
-            split[f] = part
+            # уже распределённый кадр не двигаем никогда: он уже лежит в своём проекте Label Studio
+            # (новый кадр может «склеить» старые группы из разных частей)
+            split[f] = old.get(f, part)
 
     OUT.write_text(json.dumps(dict(sorted(split.items())), indent=1))
     by_type = Counter((split[r["file"]], r["type"]) for r in rows)
