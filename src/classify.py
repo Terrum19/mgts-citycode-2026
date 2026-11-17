@@ -77,7 +77,7 @@ def main() -> None:
     ap.add_argument("root")
     ap.add_argument("--name", default="final")
     ap.add_argument("--sep")
-    ap.add_argument("--model", default="weights/dinov2-small", help="папка с весами или имя на huggingface")
+    ap.add_argument("--model", default="weights/dinov2-base", help="папка с весами или имя на huggingface")
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--folds", type=int, default=5)
     ap.add_argument("--C", type=float, default=2.0)
