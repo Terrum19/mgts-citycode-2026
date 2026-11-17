@@ -1,45 +1,47 @@
-"""Сетка картинок: разметка зелёным, предсказание красным (подпись — вид повреждения).
-
-    python src/draw.py data/smoke/manholes runs/manholes__qwen235/preds.json runs/manholes__qwen235/sheet.jpg
-
-Нужен только ffmpeg (Pillow не обязателен).
+"""Рисование рамок: зелёная — исправен, красная — повреждён (подпись — вид повреждения).
+Если передана разметка, она рисуется жёлтым пунктиром — для разбора ошибок.
 """
-import json
-import subprocess
-import sys
-import tempfile
 from pathlib import Path
 
-SHORT = {None: "ok", "cover_broken": "broken", "cover_missing": "missing",
-         "cover_open_or_shifted": "open", "ring_or_surface_damaged": "ring", "unknown": "?"}
+from PIL import Image, ImageDraw, ImageFont
+
+OK, BAD, GT = (40, 200, 70), (230, 40, 40), (255, 210, 0)
+_FONTS = ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Supplemental/Arial.ttf",
+          "/Library/Fonts/Arial.ttf", "C:/Windows/Fonts/arial.ttf"]
 
 
-def boxes(objs, color, y_text):
-    out = []
-    for o in objs:
-        x1, y1, x2, y2 = o["bbox"]
-        out.append(f"drawbox=x={x1}:y={y1}:w={max(1, x2 - x1)}:h={max(1, y2 - y1)}:color={color}:t=5")
-    tag = ",".join(SHORT.get(o.get("damage"), str(o.get("damage"))) for o in objs) or "-"
-    out.append(f"drawtext=text='{tag}':x=8:y={y_text}:fontsize=28:fontcolor={color}:box=1:boxcolor=black@0.6")
-    return out
+def font(size: int):
+    for f in _FONTS:
+        if Path(f).exists():
+            return ImageFont.truetype(f, size)
+    return ImageFont.load_default(size)
 
 
-def main() -> None:
-    data, preds_path, out = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
-    labels = json.loads((data / "labels.json").read_text())
-    preds = json.loads(preds_path.read_text())
-    with tempfile.TemporaryDirectory() as tmp:
-        for k, lab in enumerate(labels):
-            p = preds.get(lab["file"], {"objects": []})
-            vf = ",".join(boxes(lab["objects"], "lime", 8) + boxes(p["objects"], "red", 44) + ["scale=320:320"])
-            subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(data / lab["file"]), "-vf", vf,
-                            f"{tmp}/{k:03d}.jpg"], check=True)
-        cols = 6
-        rows = -(-len(labels) // cols)
-        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", f"{tmp}/%03d.jpg", "-vf",
-                        f"tile={cols}x{rows}:padding=4:color=white", "-frames:v", "1", str(out)], check=True)
-    print(out)
+def _dashed(d: ImageDraw.ImageDraw, box, color, width, dash=8):
+    x1, y1, x2, y2 = box
+    for a, b, horiz, c in ((x1, x2, True, y1), (x1, x2, True, y2), (y1, y2, False, x1), (y1, y2, False, x2)):
+        for s in range(int(a), int(b), dash * 2):
+            e = min(s + dash, b)
+            d.line((s, c, e, c) if horiz else (c, s, c, e), fill=color, width=width)
 
 
-if __name__ == "__main__":
-    main()
+def annotate(img: Image.Image, objects: list[dict], gt: list[dict] | None = None, names: dict | None = None) -> Image.Image:
+    """names: {код -> подпись} для типов и повреждений (по умолчанию — коды)."""
+    names = names or {}
+    img = img.convert("RGB").copy()
+    d = ImageDraw.Draw(img)
+    lw = max(2, round(max(img.size) / 400))
+    f = font(max(12, round(max(img.size) / 70)))
+    for g in gt or []:
+        _dashed(d, g["bbox"], GT, lw)
+        tag = g["type"] + ("" if g["status"] == "ok" else f" [{g.get('damage') or g['status']}]")
+        d.text((g["bbox"][0], g["bbox"][3] + 2), tag, fill=GT, font=f, stroke_width=2, stroke_fill="black")
+    for k, o in enumerate(objects, 1):
+        color = BAD if o["status"] == "bad" else OK
+        d.rectangle(o["bbox"], outline=color, width=lw)
+        tag = f"{k}. {names.get(o['type'], o['type'])}"
+        if o["status"] == "bad":
+            tag += ": " + names.get(o["damage"], str(o["damage"]))
+        x, y = o["bbox"][0], max(0, o["bbox"][1] - f.size - 4)
+        d.text((x, y), tag, fill=color, font=f, stroke_width=2, stroke_fill="black")
+    return img

@@ -17,6 +17,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
+from PIL import Image
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 from vlm import VLM  # noqa: E402
@@ -104,7 +106,7 @@ def main() -> None:
     if todo and not args.no_predict:
         model = VLM(cfg["variants"][args.variant], cfg["taxonomy"])
         with ThreadPoolExecutor(cfg["variants"][args.variant].get("workers", 4)) as ex:
-            for k, (f, p) in enumerate(zip(todo, ex.map(lambda f: model.predict(PANO / f, W, H), todo)), 1):
+            for k, (f, p) in enumerate(zip(todo, ex.map(lambda f: model.predict(Image.open(PANO / f)), todo)), 1):
                 cache[f] = p
                 print(f"  {k}/{len(todo)} {f}: {'ERR ' + p['error'] if p['error'] else str(len(p['objects'])) + ' obj'}")
         cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=1))

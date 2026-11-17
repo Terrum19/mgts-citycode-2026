@@ -17,6 +17,56 @@ cables_exposed = "шкаф/короб/ввод: из корпуса торчат
 cable_coil_unwound = "запас кабеля размотался («борода»), висит ниже нормы"
 equipment_fallen = "муфта или короб сорваны с крепления, висят на кабеле или упали"
 
+# Короткие подписи для отчёта и картинок (на финале дописать сюда их виды повреждений)
+[names]
+manhole = "Колодец"
+pole = "Опора"
+cabinet = "Шкаф"
+aerial_equipment = "Оборудование на опоре"
+cover_broken = "Крышка сломана"
+cover_missing = "Нет крышки"
+cover_open_or_shifted = "Крышка сдвинута/открыта"
+ring_or_surface_damaged = "Разрушено кольцо/покрытие"
+pole_tilted = "Наклон опоры"
+pole_damaged = "Повреждение опоры"
+cables_damaged = "Провисшие/оборванные кабели"
+equipment_open = "Открыта дверца/крышка"
+cabinet_damaged = "Повреждён корпус шкафа"
+cabinet_tilted = "Шкаф наклонён"
+cables_exposed = "Оголённые кабели"
+cable_coil_unwound = "Размотан запас кабеля"
+equipment_fallen = "Оборудование сорвано"
+unknown = "Повреждение (вид не определён)"
+
+# Размеченные наборы для run.py. Панорамы: data/labels.json из src/label/export.py.
+[datasets.pano_dev]
+labels = "data/labels.json"
+images = "data/raw/panoramas"
+split = "dev"
+
+[datasets.pano_test]
+labels = "data/labels.json"
+images = "data/raw/panoramas"
+split = "test"
+
+# 30 люков с Roboflow (24 повреждённых) — на панорамах повреждений почти нет, статус меряем здесь
+[datasets.damage_manholes]
+labels = "data/smoke/manholes/labels.json"
+images = "data/smoke/manholes"
+types = ["manhole"]   # размечены только люки: опоры на фоне не считаем ошибкой
+
+# Детектор для варианта 1 (kind = "det_vlm"). Классы Mapillary Vistas -> наши типы.
+# "Catch Basin" (ливнёвка) намеренно не берём.
+[detector]
+model = "facebook/mask2former-swin-large-mapillary-vistas-panoptic"
+classes = { "Manhole" = "manhole", "Utility Pole" = "pole", "Pole" = "pole", "Junction Box" = "cabinet" }
+min_score = 0.5
+min_side = 12        # меньше — VLM всё равно ничего не разглядит
+pad = 0.2            # запас вокруг объекта при вырезе
+crop_min_side = 160
+shortest_edge = 800  # вход детектора; больше — точнее на мелких люках, но медленнее
+device = "cpu"       # "mps" на маке, "cuda" при наличии
+
 # Варианты = модель + endpoint. Ключ берётся из переменной окружения / .env по имени key_env.
 [variants.qwen235]
 base_url = "https://openrouter.ai/api/v1"
@@ -49,3 +99,9 @@ base_url = "https://openrouter.ai/api/v1"
 model = "google/gemma-4-31b-it"
 key_env = "OPENROUTER_API_KEY"
 workers = 6
+
+# Вариант 1: детектор -> вырез -> VLM (статус по вырезу)
+[variants.det_qwen235]
+kind = "det_vlm"
+vlm = "qwen235"
+workers = 4

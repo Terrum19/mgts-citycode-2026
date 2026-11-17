@@ -1,0 +1,6 @@
+# вариант 1 (детектор). CPU-сборка torch занимает ~4x меньше места, чем CUDA:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+transformers
+scipy

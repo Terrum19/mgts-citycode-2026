@@ -24,6 +24,32 @@
 - [docs/webinar_transcript.txt](docs/webinar_transcript.txt) — расшифровка вебинара 12.11
 - [docs/webinar_slides/](docs/webinar_slides/) — ключевые слайды
 
+## Как запустить
+
+```bash
+uv venv .venv && uv pip install -r requirements.txt          # + requirements-detector.txt для варианта 1
+echo "OPENROUTER_API_KEY=..." >> .env
+```
+
+| Что | Команда |
+|---|---|
+| Система: фото → перечень на ремонт | `python src/predict.py --variant qwen235 --images photos/ [--meta photos.csv] --out out/run1` |
+| Интерфейс для защиты | `streamlit run src/app.py` |
+| Сравнение вариантов на разметке | `python src/run.py --variant qwen235 det_qwen235 --data pano_dev damage_manholes` |
+| Выгрузить разметку из Label Studio | `python src/label/export.py` |
+
+Всё настраивается в [config.toml](config.toml): `[taxonomy]` — типы объектов и виды повреждений (на финале
+меняем только его и `[names]`), `[variants.*]` — модели, `[datasets.*]` — наборы для оценки, `[detector]` — вариант 1.
+
+| Файл | Что делает |
+|---|---|
+| `src/vlm.py` | клиент OpenAI-совместимого API, промпты, разбор ответа |
+| `src/detector.py` | Mask2Former (Mapillary Vistas): люки, опоры, шкафы → рамки |
+| `src/variants.py` | `make(имя).predict(фото)` — один интерфейс для всех вариантов |
+| `src/evaluate.py` | метрики: поиск объектов по типам, полнота по `bad`, вид повреждения, $/сек |
+| `src/run.py` | прогон вариантов на наборах, кэш ответов, картинки худших ошибок в `runs/*/review/` |
+| `src/predict.py`, `src/app.py` | система для финала: CLI и Streamlit |
+
 ## Открытые вопросы к организаторам (задать в чате кейса)
 
 1. Будет ли интернет на площадке и можно ли пользоваться внешними API (OpenRouter и т.п.)?
