@@ -26,8 +26,13 @@ def build_prompt(labels: list[str], hint: str | None = None, examples: list[str]
 Выбери ровно один класс (тип объекта и состояние) из списка:
 {opts}
 """
-    if hint:
+    if isinstance(hint, str):
         p += f"\nКлассификатор считает, что это «{hint}». Проверь и исправь, если он ошибся.\n"
+    elif hint:  # [[класс, вероятность], ...] — переранжирование
+        top = "\n".join(f"- {lab}: {pr:.0%}" for lab, pr in hint)
+        p += ("\nКлассификатор, обученный на размеченных фото (верен примерно в 70% случаев), "
+              f"даёт самые вероятные классы:\n{top}\nПосмотри на фото внимательно и выбери правильный класс; "
+              "обычно это один из этих, но можно выбрать и другой из списка.\n")
     if examples:
         p += "\nПримеры описаний экспертов для похожих фото (пиши в таком же стиле):\n" + \
              "\n".join(f"- {e}" for e in examples) + "\n"
@@ -53,9 +58,10 @@ def main() -> None:
     ap.add_argument("--variant", default="qwen235")
     ap.add_argument("--per-class", type=int, default=20)
     ap.add_argument("--sep")
-    ap.add_argument("--hints", help="metrics.json от classify.py eval: VLM проверяет ответ классификатора")
+    ap.add_argument("--hints", help="metrics.json от classify.py eval (поле cv_pred) или top3.json от sweep.py --dump")
     args = ap.parse_args()
-    hints = json.loads(Path(args.hints).read_text())["cv_pred"] if args.hints else {}
+    hints = json.loads(Path(args.hints).read_text()) if args.hints else {}
+    hints = hints.get("cv_pred", hints)
     cfg = load_config()
     root = Path(args.root)
     items = load(root, args.sep)
@@ -69,13 +75,14 @@ def main() -> None:
         res = list(ex.map(lambda x: classify(vlm, Image.open(root / x["file"]), labels, hints.get(x["file"])), sample))
     acc = sum(r["label"] == x["label"] for r, x in zip(res, sample)) / len(sample)
     if hints:
-        h_acc = sum(hints[x["file"]] == x["label"] for x in sample) / len(sample)
+        top1 = {f: (h if isinstance(h, str) else h[0][0]) for f, h in hints.items()}
+        h_acc = sum(top1[x["file"]] == x["label"] for x in sample) / len(sample)
         print(f"классификатор на той же выборке: {h_acc:.3f}")
     print(f"{args.variant}{' + подсказка' if hints else ''}: {len(sample)} фото, точность {acc:.3f}, сек/фото {sum(r['seconds'] for r in res) / len(res):.1f}, "
           f"${sum(r['cost'] for r in res):.3f}, битых ответов {sum(r['label'] is None for r in res)}, всего {time.time() - t0:.0f} с")
     print("частые ошибки:", *Counter(f"{x['label']} -> {r['label']}" for r, x in zip(res, sample)
                                       if r["label"] != x["label"]).most_common(8), sep="\n  ")
-    out = Path("runs/cls") / f"{root.name}__vlm_{args.variant}{'_hint' if hints else ''}.json"
+    out = Path("runs/cls") / f"{root.name}__vlm_{args.variant}{'_' + Path(args.hints).stem if hints else ''}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps([{"file": x["file"], "gt": x["label"], **r} for x, r in zip(sample, res)],
                               ensure_ascii=False, indent=1))
