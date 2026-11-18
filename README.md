@@ -19,6 +19,7 @@
 
 - [docs/case.md](docs/case.md) — постановка кейса и всё, что сказали на вебинаре (включая ответы на вопросы)
 - [docs/plan.md](docs/plan.md) — **финальный план**: валидационный стенд, три варианта, метрики, график
+- [docs/speed.md](docs/speed.md) — скорость связки на M4/CPU и сколько времени займёт финал
 - [docs/models.md](docs/models.md) — справка по моделям: детекторы, VLM, OpenRouter
 - [docs/essay.md](docs/essay.md) — квалификационное эссе
 - [docs/webinar_transcript.txt](docs/webinar_transcript.txt) — расшифровка вебинара 12.11
