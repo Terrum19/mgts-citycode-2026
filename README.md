@@ -34,6 +34,7 @@ echo "OPENROUTER_API_KEY=..." >> .env
 
 | Что | Команда |
 |---|---|
+| **Финал: папки train → выбор связки → предсказания test** | `python src/final.py data/final_train data/final_test --out out/final` |
 | Система: фото → перечень на ремонт | `python src/predict.py --variant qwen235 --images photos/ [--meta photos.csv] --out out/run1` |
 | Интерфейс для защиты | `streamlit run src/app.py` |
 | Сравнение вариантов на разметке | `python src/run.py --variant qwen235 det_qwen235 --data pano_dev damage_manholes` |
