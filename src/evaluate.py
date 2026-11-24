@@ -48,6 +48,7 @@ def prf(tp, fp, fn) -> tuple[float, float, float]:
 def evaluate(labels: list[dict], preds: dict[str, dict], thr: float = 0.5) -> dict:
     det = {t: Counter() for t in (thr, 0.3)}   # tp / gt / pr по порогам
     per_type = {}                              # тип -> Counter(tp, gt, pr) при основном пороге
+    repair_tp = repair_pred = review = 0
     any_type_tp = 0                            # нашли место объекта, но, возможно, с другим типом
     st, img, confusion, type_conf = Counter(), Counter(), Counter(), Counter()
     dmg_ok = dmg_n = n_bad_gt = 0
@@ -88,6 +89,12 @@ def evaluate(labels: list[dict], preds: dict[str, dict], thr: float = 0.5) -> di
         for i, j in ma:
             type_conf[(gt[i]["type"], pr[j]["type"])] += 1
 
+        bad_gt = [o for o in gt if o["status"] == "bad"]
+        bad_pr = [o for o in pr if o["status"] == "bad"]
+        confirmed = match(bad_gt, bad_pr, thr)
+        repair_tp += len(confirmed)
+        repair_pred += len(bad_pr)
+        review += sum(o["status"] == "review" for o in pr)
         status_err = 0
         for i, j in m:
             g, q = gt[i], pr[j]
@@ -103,7 +110,7 @@ def evaluate(labels: list[dict], preds: dict[str, dict], thr: float = 0.5) -> di
         p_bad = any(o["status"] == "bad" for o in pr)
         img[(g_bad, p_bad)] += 1
         per_image.append({"file": lab["file"], "fn": len(gt) - len(m), "fp": len(pr) - len(m),
-                          "status_err": status_err, "missed_bad": g_bad and not p_bad})
+                          "status_err": status_err, "missed_bad": len(confirmed) < len(bad_gt)})
 
     n = len(labels) - skipped
     out = {"images": n, "skipped_bad_frames": skipped, "gt_objects": det[thr]["gt"],
@@ -114,8 +121,11 @@ def evaluate(labels: list[dict], preds: dict[str, dict], thr: float = 0.5) -> di
         out[f"det_recall{sfx}"] = c["tp"] / c["gt"] if c["gt"] else 0.0
     out["det_recall_anytype"] = any_type_tp / det[thr]["gt"] if det[thr]["gt"] else 0.0
     ip, ir, if1 = prf(img[(True, True)], img[(False, True)], img[(True, False)])
-    sp, sr, sf1 = prf(st[("bad", "bad")], st[("ok", "bad")], st[("bad", "ok")])
+    sp, sr, sf1 = prf(st[("bad", "bad")], st[("ok", "bad")], st[("bad", "ok")] + st[("bad", "review")])
+    rp, rr, rf = prf(repair_tp, repair_pred - repair_tp, n_bad_gt - repair_tp)
     out |= {
+        "repair_tp": repair_tp, "repair_fp": repair_pred - repair_tp, "repair_fn": n_bad_gt - repair_tp,
+        "repair_precision": rp, "repair_recall": rr, "repair_f1": rf, "review_objects": review,
         "img_bad_recall": ir, "img_bad_precision": ip, "img_bad_f1": if1,
         "img_accuracy": (img[(True, True)] + img[(False, False)]) / n if n else 0.0,
         "obj_bad_recall": sr, "obj_bad_precision": sp, "obj_bad_f1": sf1,

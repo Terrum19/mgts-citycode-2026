@@ -4,3 +4,4 @@ torch
 torchvision
 transformers
 scipy
+scikit-learn

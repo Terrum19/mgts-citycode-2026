@@ -40,6 +40,39 @@ echo "OPENROUTER_API_KEY=..." >> .env
 | Сравнение вариантов на разметке | `python src/run.py --variant qwen235 det_qwen235 --data pano_dev damage_manholes` |
 | Выгрузить разметку из Label Studio | `python src/label/export.py` |
 
+### Режимы финала
+
+Для локальных вариантов установите также `requirements-detector.txt`. Заранее положите
+`dinov2-base` в `weights/` (`python src/fetch_weights.py facebook/dinov2-base`) и скачайте Mask2Former
+из `[detector].model` в локальный кэш Transformers. На месте проверьте с `HF_HUB_OFFLINE=1`.
+
+| Формат задания | Запуск |
+|---|---|
+| Один класс на фото | `python src/final.py TRAIN TEST --no-qwen --out out/final`, затем `photo_dino` в интерфейсе для новых фото |
+| Объекты с готовыми рамками | `python src/predict.py --variant boxes_dino --images PHOTO_DIR --boxes boxes.json --meta photos.xlsx --out out/boxes` |
+| Рамки нужно найти локально | `python src/predict.py --variant det_dino --images PHOTO_DIR --meta photos.xlsx --out out/det` |
+| Рамки нужно найти, API доступен | `python src/predict.py --variant qwen235 --images PHOTO_DIR --meta photos.xlsx --out out/qwen` |
+
+`boxes.json` — массив записей `{"file":"foto.jpg","objects":[{"bbox":[10,20,130,180],"type":"manhole","object_id":"42"}]}`.
+Координаты в пикселях, `[x1,y1,x2,y2]`. Пустой кадр задаётся через `"objects":[]`.
+Тип и ID объекта можно опустить. Для папок тестовых фото, которые являются просто
+каталогами, укажите `--test-format images`. Для размеченного теста используйте `--test-format labeled`.
+
+### Обучение и оценка кропов
+
+```bash
+python src/poc/make_crop_train.py > crop_train.json
+python src/crop_dino.py crop_train.json data
+python src/run.py --variant det_dino --data pano_dev
+python src/poc/compare_crops.py pano_dev runs/pano_dev__det_dino/preds.json
+```
+
+Для адаптации к рамкам организатора используйте `src/crop_dino.py LABELS PHOTO_DIR`.
+В `LABELS` применяется тот же JSON, дополненный `status` (`ok` или `bad`)
+и `damage` для каждого объекта. При нехватке примеров состояния или низкой уверенности
+найденный объект попадает в `review.csv`. `repair.csv` содержит подтверждённые заявки.
+В отчёте оценки `repair_recall` учитывает и пропущенные рамки. Сначала подбирайте параметры на dev.
+
 Всё настраивается в [config.toml](config.toml): `[taxonomy]` — типы объектов и виды повреждений (на финале
 меняем только его и `[names]`), `[variants.*]` — модели, `[datasets.*]` — наборы для оценки, `[detector]` — вариант 1.
 

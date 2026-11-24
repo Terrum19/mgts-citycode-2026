@@ -63,7 +63,7 @@ class DetVLM:
             a = r["answer"]
             if a is None:                   # VLM не ответила — объект оставляем, статус не знаем
                 out["bad_json"] |= r["bad_json"]
-                out["objects"].append({**d, "status": "ok", "damage": None, "description": "", "vlm_failed": True})
+                out["objects"].append({**d, "status": "review", "damage": None, "description": "", "vlm_failed": True})
                 continue
             if a.get("is_object") is False:  # VLM отклонила находку детектора (знак, ливнёвка и т.п.)
                 continue
@@ -81,6 +81,12 @@ def make(name: str, cfg: dict):
     kind = vcfg.get("kind", "vlm")
     if kind == "vlm":
         return VLMOnly(vcfg, cfg)
+    if kind == "photo_dino":
+        from photo_dino import PhotoDino
+        return PhotoDino(vcfg)
+    if kind in ("det_dino", "boxes_dino"):
+        from crop_dino import CropDino
+        return CropDino(vcfg, cfg["detector"] if kind == "det_dino" else None)
     if kind == "det_vlm":
         return DetVLM(vcfg, cfg)
     raise ValueError(f"неизвестный kind={kind!r} у варианта {name}")

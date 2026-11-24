@@ -27,7 +27,8 @@ OK_WORDS = ("норм", "исправ", "без дефект", "без повр�
 
 
 def is_ok(defect: str) -> bool:
-    return any(w in defect.lower() for w in OK_WORDS)
+    normalized = defect.lower()
+    return "неисправ" not in normalized and any(w in normalized for w in OK_WORDS)
 
 
 def make_clf(C: float = 2.0):

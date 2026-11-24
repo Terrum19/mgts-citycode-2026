@@ -37,18 +37,46 @@ def split_label(label: str, sep: str | None) -> tuple[str, str]:
 
 def match_table(df, names: list[str]) -> dict[str, dict]:
     """{имя фото -> строка таблицы}: колонку с файлом ищем по совпадениям (с расширением или без)."""
-    keys = {n.lower(): n for n in names} | {Path(n).stem.lower(): n for n in names}
+    from collections import defaultdict
 
-    def hit(v):
-        v = Path(str(v).strip()).name.lower()
-        return keys.get(v) or keys.get(Path(v).stem)
+    exact = {n.replace("\\", "/").casefold(): n for n in names}
+    aliases = defaultdict(set)
+    for n in names:
+        aliases[Path(n).name.casefold()].add(n)
+        aliases[Path(n).stem.casefold()].add(n)
+
+    def hit(value):
+        key = str(value).strip().replace("\\", "/").casefold()
+        if key in exact:
+            return exact[key]
+        matches = aliases.get(Path(key).name) or aliases.get(Path(key).stem, set())
+        return next(iter(matches)) if len(matches) == 1 else None
 
     if df.empty:
         return {}
-    col = max(df.columns, key=lambda c: sum(bool(hit(v)) for v in df[c]))
-    if not any(hit(v) for v in df[col]):  # имён файлов в таблице нет — надеемся на порядок строк
-        return {n: r for n, r in zip(sorted(names), df.to_dict("records"))}
-    return {hit(r[col]): {k: v for k, v in r.items() if k != col} for r in df.to_dict("records") if hit(r[col])}
+    scores = {}
+    for col in df:
+        hits = {hit(v) for v in df[col]} - {None}
+        explicit = {str(v).strip().replace("\\", "/").casefold() for v in df[col]} & exact.keys()
+        scores[col] = (len(hits), len(explicit))
+    best = max(scores.values(), default=(0, 0))
+    columns = [col for col, score in scores.items() if score == best]
+    if not best[0] or len(columns) != 1:
+        print("Таблица: не удалось однозначно определить колонку имени фото")
+        return {}
+    col = columns[0]
+    result, duplicates = {}, set()
+    for row in df.to_dict("records"):
+        name = hit(row[col])
+        if name is not None:
+            if name in result:
+                duplicates.add(name)
+            result[name] = {key: value for key, value in row.items() if key != col}
+    for name in duplicates:
+        result.pop(name)
+    if len(result) != len(names):
+        print(f"Таблица: однозначные строки для {len(result)} из {len(names)} фото")
+    return result
 
 
 def description_column(rows: list[dict]) -> str | None:

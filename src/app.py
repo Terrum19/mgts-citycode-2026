@@ -14,7 +14,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import variants  # noqa: E402
-from predict import IMG_EXT, index_meta, read_meta, run, write_csv  # noqa: E402
+from predict import IMG_EXT, index_meta, read_boxes, read_meta, run, write_csv  # noqa: E402
 from run import load_config  # noqa: E402
 from vlm import ROOT  # noqa: E402
 
@@ -37,7 +37,8 @@ c1, c2 = st.columns([3, 2])
 files = c1.file_uploader("Фото", type=[e[1:] for e in IMG_EXT], accept_multiple_files=True)
 meta_file = c2.file_uploader("Таблица с ID / координатами фото (необязательно)", type=["csv", "xlsx", "jsonl"])
 
-if st.button("Запустить", type="primary", disabled=not files):
+boxes_file = c2.file_uploader("Рамки объектов", type=["json"]) if v.get("kind") == "boxes_dino" else None
+if st.button("Запустить", type="primary", disabled=not files or (v.get("kind") == "boxes_dino" and not boxes_file)):
     out = ROOT / "out" / "app" / time.strftime("%Y%m%d-%H%M%S")
     (out / "input").mkdir(parents=True)
     paths = []
@@ -50,15 +51,23 @@ if st.button("Запустить", type="primary", disabled=not files):
         mp = out / ("meta" + Path(meta_file.name).suffix)
         mp.write_bytes(meta_file.getbuffer())
         meta = index_meta(read_meta(mp), [p.name for p in paths])
+    boxes = None
+    if boxes_file:
+        box_path = out / "boxes.json"
+        box_path.write_bytes(boxes_file.getbuffer())
+        boxes = read_boxes(box_path)
+    if meta_file and len(meta) != len(paths):
+        st.warning(f"У {len(paths) - len(meta)} фото нет однозначной привязки к таблице")
     bar = st.progress(0.0, text="Загружаю модель…")
     model = variants.make(variant, cfg)
 
     def progress(k, n, p, pred):
         bar.progress(k / n, text=f"{k}/{n}: {p.name}")
 
-    rows, preds = run(model, paths, meta, names, out, model.workers, progress)
+    rows, preds = run(model, paths, meta, names, out, model.workers, progress, boxes)
     write_csv(out / "objects.csv", rows)
     write_csv(out / "repair.csv", [r for r in rows if r["status"] == "bad"])
+    write_csv(out / "review.csv", [r for r in rows if r["status"] == "review"])
     st.session_state["result"] = {"out": out, "rows": rows, "preds": preds, "paths": paths}
     bar.empty()
 
@@ -67,6 +76,7 @@ if res:
     rows, preds, out = res["rows"], res["preds"], res["out"]
     df = pd.DataFrame(rows)
     bad = df[df["status"] == "bad"] if len(df) else df
+    review = df[df["status"] == "review"] if len(df) else df
     errors = sum(bool(p["error"]) for p in preds.values())
     m = st.columns(5)
     m[0].metric("Фото", len(preds))
@@ -81,8 +91,11 @@ if res:
         st.dataframe(bad.drop(columns=[c for c in hide if c in bad]), width="stretch", hide_index=True)
     else:
         st.info("Повреждённых объектов не найдено.")
-    d1, d2 = st.columns(2)
-    for col, name, data in ((d1, "repair.csv", bad), (d2, "objects.csv", df)):
+    if len(review):
+        st.subheader("На ручную проверку")
+        st.dataframe(review, hide_index=True)
+    d1, d2, d3 = st.columns(3)
+    for col, name, data in ((d1, "repair.csv", bad), (d2, "objects.csv", df), (d3, "review.csv", review)):
         buf = io.StringIO()
         data.to_csv(buf, index=False)
         col.download_button(f"Скачать {name}", buf.getvalue().encode("utf-8-sig"), name, "text/csv")
@@ -95,7 +108,7 @@ if res:
         pts[lat] = pd.to_numeric(pts[lat], errors="coerce")
         pts[lon] = pd.to_numeric(pts[lon], errors="coerce")
         pts = pts.dropna().drop_duplicates()
-        pts["color"] = pts["status"].map({"bad": "#e62828", "ok": "#28c846"})
+        pts["color"] = pts["status"].map({"bad": "#e62828", "ok": "#28c846", "review": "#ffd200"})
         st.map(pts.rename(columns={lat: "lat", lon: "lon"}), color="color", size=6)
 
     st.subheader("Фото")
@@ -113,5 +126,7 @@ if res:
                 tag = names.get(o["type"], o["type"])
                 if o["status"] == "bad":
                     b.markdown(f"**{k}. {tag}** — :red[{names.get(o['damage'], o['damage'])}]  \n{o['description']}")
+                elif o["status"] == "review":
+                    b.markdown(f"**{k}. {tag}** — на проверку")
                 else:
                     b.markdown(f"**{k}. {tag}** — :green[исправен]  \n{o['description']}")

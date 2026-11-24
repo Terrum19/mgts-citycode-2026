@@ -37,11 +37,16 @@ def annotate(img: Image.Image, objects: list[dict], gt: list[dict] | None = None
         tag = g["type"] + ("" if g["status"] == "ok" else f" [{g.get('damage') or g['status']}]")
         d.text((g["bbox"][0], g["bbox"][3] + 2), tag, fill=GT, font=f, stroke_width=2, stroke_fill="black")
     for k, o in enumerate(objects, 1):
-        color = BAD if o["status"] == "bad" else OK
-        d.rectangle(o["bbox"], outline=color, width=lw)
+        status = o["status"]
+        color = {"bad": BAD, "ok": OK}.get(status, GT)
+        box = o["bbox"]
+        if box is not None:
+            d.rectangle(box, outline=color, width=lw)
         tag = f"{k}. {names.get(o['type'], o['type'])}"
         if o["status"] == "bad":
             tag += ": " + names.get(o["damage"], str(o["damage"]))
-        x, y = o["bbox"][0], max(0, o["bbox"][1] - f.size - 4)
+        if status == "review":
+            tag += " · на проверку"
+        x, y = (4, 4) if box is None else (box[0], max(0, box[1] - f.size - 4))
         d.text((x, y), tag, fill=color, font=f, stroke_width=2, stroke_fill="black")
     return img

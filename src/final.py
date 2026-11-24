@@ -50,17 +50,22 @@ def pick_device(want):
     return "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def load_test(root: Path):
+def load_test(root: Path, classes, test_format="auto"):
     """Папки «Тип - Дефект» -> (items, True); плоская папка с фото (+ Excel) -> (items без label, False)."""
-    items = load(root)
-    if items:
-        return items, True
-    imgs = sorted(p for p in root.rglob("*") if p.suffix.lower() in IMG_EXT)
+    imgs = sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXT)
+    if test_format != "images":
+        items = load(root)
+        if test_format == "labeled":
+            if not items or len(items) != len(imgs):
+                raise ValueError("В режиме labeled все фото должны лежать в папках классов")
+            return items, True
+        if items and len(items) == len(imgs) and all(item["label"] in classes for item in items):
+            return items, True
     meta = {}
     for t in sorted(p for p in root.rglob("*") if p.suffix.lower() in TABLE_EXT and not p.name.startswith("~$")):
-        meta |= match_table(read_table(t), [p.name for p in imgs])
+        meta |= match_table(read_table(t), [p.relative_to(root).as_posix() for p in imgs])
     return [{"file": p.relative_to(root).as_posix(), "label": None,
-             "extra": {k: v for k, v in meta.get(p.name, {}).items() if v == v}} for p in imgs], False
+             "extra": {k: v for k, v in meta.get(p.relative_to(root).as_posix(), {}).items() if v == v}} for p in imgs], False
 
 
 def score(y, pred, ok_of) -> dict:
@@ -240,14 +245,17 @@ def main():
     ap.add_argument("--C", type=float, default=32.0, help="регуляризация логрега")
     ap.add_argument("--val", type=float, default=0.2, help="доля train для выбора связки")
     ap.add_argument("--no-qwen", action="store_true")
+    ap.add_argument("--test-format", choices=["auto", "images", "labeled"], default="auto")
     args = ap.parse_args()
 
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     tr_root, te_root = Path(args.train), Path(args.test)
     tr = load(tr_root)
-    te, te_labeled = load_test(te_root)
     classes = sorted({x["label"] for x in tr})
+    te, te_labeled = load_test(te_root, classes, args.test_format)
+    if len(classes) < 2 or not te:
+        ap.error("нужны хотя бы два класса в train и хотя бы одно фото в test")
     n_cls = len(classes)
     y = np.array([classes.index(x["label"]) for x in tr])
     ok_of = {x["label"]: is_ok(x["defect"]) for x in tr + (te if te_labeled else [])}
@@ -316,6 +324,16 @@ def main():
     use_lr, use_ft = best["base"] in ("логрег", "логрег+дообучение"), best["base"] in ("дообучение", "логрег+дообучение")
     clf = logreg(F, y, everything, n_cls, args.C)[0] if use_lr else None
     net = train_tail(enc, H, Hf, y, everything, n_cls, args.epochs, args.lr) if use_ft else None
+    import joblib
+    # CPU tensors keep the checkpoint portable between CPU and MPS.
+    state = {
+        "size": args.size, "k": args.k, "classes": classes,
+        "ok": {c: ok_of[c] for c in classes}, "logreg": clf,
+        "tail": {key: value.cpu() for key, value in net.state_dict().items()} if net is not None else None,
+        "qwen_weight": best["w"],
+    }
+    joblib.dump(state, out / "photo_dino.joblib.tmp")
+    (out / "photo_dino.joblib.tmp").replace(out / "photo_dino.joblib")
     del H, Hf
     times["обучение на 100%"] = time.time() - t
     log("переобучено на всём train")

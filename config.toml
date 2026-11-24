@@ -105,3 +105,23 @@ workers = 6
 kind = "det_vlm"
 vlm = "qwen235"
 workers = 4
+
+[variants.det_dino]
+kind = "det_dino"
+encoder = "weights/dinov2-base"
+checkpoint = "weights/crop_dino.joblib"
+size = 224
+pad = 0.2
+crop_min_side = 96
+class_policy = "detector"
+min_confidence = 0.55
+
+[variants.boxes_dino]
+kind = "boxes_dino"
+checkpoint = "weights/crop_dino.joblib"
+class_policy = "detector"
+min_confidence = 0.55
+
+[variants.photo_dino]
+kind = "photo_dino"
+checkpoint = "out/final/photo_dino.joblib"

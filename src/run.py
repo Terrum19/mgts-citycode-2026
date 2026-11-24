@@ -24,7 +24,7 @@ from draw import annotate  # noqa: E402
 from evaluate import evaluate, load_labels  # noqa: E402
 from vlm import ROOT  # noqa: E402
 
-ROWS = ["images", "gt_objects", "gt_bad_objects", "det_precision", "det_recall", "det_precision@0.3",
+ROWS = ["repair_tp", "repair_fp", "repair_fn", "repair_precision", "repair_recall", "review_objects", "images", "gt_objects", "gt_bad_objects", "det_precision", "det_recall", "det_precision@0.3",
         "det_recall@0.3", "det_recall_anytype", "img_bad_recall", "img_bad_precision", "obj_bad_recall",
         "obj_bad_precision", "damage_acc", "bad_json_rate", "error_rate", "sec_per_image", "cost_usd"]
 
