@@ -2,6 +2,7 @@
 data/
 weights/
 runs/
+out/
 *.pt
 *.safetensors
 *.gguf

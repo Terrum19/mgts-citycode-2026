@@ -17,13 +17,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
+from PIL import Image
+
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 from vlm import VLM  # noqa: E402
 
 PANO = ROOT / "data/raw/panoramas"
 OUT = ROOT / "data/label"
-W, H = 1280, 600
 TYPE_RU = {"manhole": "колодец", "street_lamp": "опора", "street_cabinet": "шкаф"}
 
 
@@ -62,7 +63,7 @@ def label_config(tax: dict) -> str:
 """
 
 
-def to_prediction(objs: list[dict], model: str) -> dict:
+def to_prediction(objs: list[dict], model: str, W: int, H: int) -> dict:
     result = []
     for k, o in enumerate(objs):
         x1, y1, x2, y2 = o["bbox"]
@@ -104,7 +105,7 @@ def main() -> None:
     if todo and not args.no_predict:
         model = VLM(cfg["variants"][args.variant], cfg["taxonomy"])
         with ThreadPoolExecutor(cfg["variants"][args.variant].get("workers", 4)) as ex:
-            for k, (f, p) in enumerate(zip(todo, ex.map(lambda f: model.predict(PANO / f, W, H), todo)), 1):
+            for k, (f, p) in enumerate(zip(todo, ex.map(lambda f: model.predict(Image.open(PANO / f)), todo)), 1):
                 cache[f] = p
                 print(f"  {k}/{len(todo)} {f}: {'ERR ' + p['error'] if p['error'] else str(len(p['objects'])) + ' obj'}")
         cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=1))
@@ -117,7 +118,7 @@ def main() -> None:
                              "target_type": m["type"], "target_ru": TYPE_RU.get(m["type"], m["type"]),
                              "location_id": m["location_id"], "dist_m": round(m["dist"], 1)}}
             if part == "dev" and f in cache and not cache[f].get("error"):
-                task["predictions"] = [to_prediction(cache[f]["objects"], cfg["variants"][args.variant]["model"])]
+                task["predictions"] = [to_prediction(cache[f]["objects"], cfg["variants"][args.variant]["model"], *Image.open(PANO / f).size)]
             tasks.append(task)
         (OUT / f"tasks_{part}.json").write_text(json.dumps(tasks, ensure_ascii=False, indent=1))
         n_pred = sum(bool(t.get("predictions")) for t in tasks)
