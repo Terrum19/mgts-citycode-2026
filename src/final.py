@@ -283,11 +283,14 @@ def main():
     H, Hf, F = [], [], []
     for imgs in enc.batches(tr_paths, what="train"):
         h = enc.frozen(imgs)
-        H.append(h.half().cpu())
+        if args.training != "head":
+            H.append(h.half().cpu())
         F.append(enc.feats(h))
-    for imgs in enc.batches(tr_paths, flip=True, what="train, отражённые"):
-        Hf.append(enc.frozen(imgs).half().cpu())
-    H, Hf, F = torch.cat(H), torch.cat(Hf), np.concatenate(F)
+    if args.training != "head":
+        for imgs in enc.batches(tr_paths, flip=True, what="train, отражённые"):
+            Hf.append(enc.frozen(imgs).half().cpu())
+        H, Hf = torch.cat(H), torch.cat(Hf)
+    F = np.concatenate(F)
     times["проход по train"] = time.time() - t
     log(f"проход по train готов ({times['проход по train'] / 60:.1f} мин)")
 

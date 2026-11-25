@@ -80,7 +80,14 @@ def read_boxes(path):
     """JSON с записями {file, objects: [{bbox: [x1,y1,x2,y2], type?, object_id?}]}."""
     from math import isfinite
     boxes = {}
-    for row in json.loads(path.read_text(encoding="utf-8-sig")):
+    records = json.loads(path.read_text(encoding="utf-8-sig"))
+    if isinstance(records, dict):
+        for filename, prediction in records.items():
+            if not isinstance(prediction, dict) or not isinstance(prediction.get("detections"), list):
+                raise ValueError(f"Нет сохранённых рамок детектора для: {filename}")
+        records = [{"file": filename, "objects": prediction["detections"]}
+                   for filename, prediction in records.items()]
+    for row in records:
         name = row["file"]
         if name in boxes:
             raise ValueError(f"Повтор фото в файле рамок: {name}")
@@ -105,16 +112,17 @@ def run(model, paths: list[Path], meta: dict, names: dict, out: Path | None = No
 
     def one(p: Path):
         with Image.open(p) as image:
-            img = image.convert("RGB")
-        if boxes is None:
-            pred = model.predict(img)
-        else:
-            supplied = boxes[p.name]
-            if any(o["bbox"][2] > img.width or o["bbox"][3] > img.height for o in supplied):
-                raise ValueError(f"Рамка за пределами фото: {p.name}")
-            pred = model.predict(img, boxes=supplied)
-        if out:
-            annotate(img, pred["objects"], names=names).save(out / "annotated" / (p.stem + ".jpg"), quality=88)
+            img = image if image.mode == "RGB" else image.convert("RGB")
+            img.load()
+            if boxes is None:
+                pred = model.predict(img)
+            else:
+                supplied = boxes[p.name]
+                if any(o["bbox"][2] > img.width or o["bbox"][3] > img.height for o in supplied):
+                    raise ValueError(f"Рамка за пределами фото: {p.name}")
+                pred = model.predict(img, boxes=supplied)
+            if out:
+                annotate(img, pred["objects"], names=names).save(out / "annotated" / (p.stem + ".jpg"), quality=88)
         return p, pred
 
     rows, preds = [], {}
@@ -134,7 +142,7 @@ def main() -> None:
     ap.add_argument("--meta", help="CSV/XLSX/JSONL с ID и координатами фото")
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int)
-    ap.add_argument("--boxes", type=Path, help="JSON с рамками для boxes_dino")
+    ap.add_argument("--boxes", type=Path, help="рамки организатора или preds.json предыдущего запуска det_dino")
     args = ap.parse_args()
     cfg = load_config()
     names = names_ru(cfg)

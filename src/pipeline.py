@@ -20,7 +20,7 @@ def parser():
     p.add_argument("--annotations", type=Path)
     p.add_argument("--split", help="часть разметки для обучения, например dev")
     p.add_argument("--images", type=Path, help="фото для предсказаний / test для final")
-    p.add_argument("--boxes", type=Path)
+    p.add_argument("--boxes", type=Path, help="рамки организатора или preds.json предыдущего запуска det_dino")
     p.add_argument("--meta", type=Path)
     p.add_argument("--dataset", help="оценка набора из datasets в конфиге вместо predict")
     p.add_argument("--checkpoint", type=Path, help="путь к модели; при обучении будет записан сюда")

@@ -28,7 +28,7 @@ def _dashed(d: ImageDraw.ImageDraw, box, color, width, dash=8):
 def annotate(img: Image.Image, objects: list[dict], gt: list[dict] | None = None, names: dict | None = None) -> Image.Image:
     """names: {код -> подпись} для типов и повреждений (по умолчанию — коды)."""
     names = names or {}
-    img = img.convert("RGB").copy()
+    img = img.convert("RGB")
     d = ImageDraw.Draw(img)
     lw = max(2, round(max(img.size) / 400))
     f = font(max(12, round(max(img.size) / 70)))

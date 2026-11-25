@@ -21,6 +21,40 @@ from vlm import ROOT  # noqa: E402
 LAT = ("lat", "latitude", "широта", "pano_lat")
 LON = ("lon", "lng", "longitude", "долгота", "pano_lon")
 
+
+def weight_files_version(directories):
+    versions = []
+    for directory in directories:
+        for path in sorted(directory.iterdir()):
+            if path.is_file():
+                info = path.stat()
+                versions.append((path, info.st_ino, info.st_size, info.st_ctime_ns))
+    return versions
+
+
+def model_for_session(name, config):
+    settings = config["variants"][name]
+    if settings.get("kind") not in ("det_dino", "boxes_dino", "photo_dino") or settings.get("qwen"):
+        st.session_state.pop("local_model", None)
+        return variants.make(name, config)
+    checkpoint = (ROOT / settings["checkpoint"]).stat()
+    identity = (name, config, checkpoint.st_ino, checkpoint.st_size, checkpoint.st_ctime_ns)
+    cached = st.session_state.get("local_model")
+    if cached is not None and cached[0] == identity:
+        directories = cached[1]
+        if all(path.is_dir() for path in directories) and weight_files_version(directories) == cached[2]:
+            return cached[3]
+    st.session_state.pop("local_model", None)
+    del cached
+    model = variants.make(name, config)
+    directories = [getattr(model.encoder, "path", ROOT / "weights/dinov2-base")]
+    if settings["kind"] == "det_dino":
+        directories.append(Path(config["detector"]["model"]))
+    if all(path.is_dir() for path in directories):
+        st.session_state.local_model = (identity, directories, weight_files_version(directories), model)
+    return model
+
+
 st.set_page_config(page_title="МГТС: осмотр инфраструктуры", layout="wide")
 cfg = load_config()
 names = cfg.get("names", {})
@@ -59,7 +93,7 @@ if st.button("Запустить", type="primary", disabled=not files or (v.get(
     if meta_file and len(meta) != len(paths):
         st.warning(f"У {len(paths) - len(meta)} фото нет однозначной привязки к таблице")
     bar = st.progress(0.0, text="Загружаю модель…")
-    model = variants.make(variant, cfg)
+    model = model_for_session(variant, cfg)
 
     def progress(k, n, p, pred):
         bar.progress(k / n, text=f"{k}/{n}: {p.name}")
