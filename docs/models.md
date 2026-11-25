@@ -19,9 +19,27 @@ out = model(**proc(images=img, return_tensors="pt"))
 res = proc.post_process_panoptic_segmentation(out, target_sizes=[img.size[::-1]])[0]
 ```
 
+### Подключаемые бэкенды (`[detector].backend`)
+
+Код детектора — один интерфейс `detect(img)`, выбор модели в config.toml. По умолчанию стоит
+проверенный `mask2former`; смена бэкенда меняет `fingerprint()` и инвалидирует кэш `runs/*/preds.json`.
+
+| backend | Модель | Плюсы | Минусы |
+|---|---|---|---|
+| `mask2former` | Swin-L на Mapillary Vistas (panoptic) | не путает люк и ливнёвку; проверен на проекте | секунды на CPU, нет `aerial_equipment`, веса `CC BY-NC-SA 4.0` |
+| `grounding_dino` | `IDEA-Research/grounding-dino-*`, Apache-2.0 | open-vocabulary: можно искать `aerial_equipment`; лёгкий | хуже различает люк и ливнёвку: нецелевое отсекается на 2-м уровне каскада (`is_object = false`) |
+| `rtdetr` | свои веса (Apache-2.0/`RT-DETR`) | скорость, лицензионная чистота | нужно обучение на псевдоразметке; весов в репозитории нет |
+
+Для `grounding_dino` в `[detector]` задаются `prompts = { наш_тип = "текст запроса." }`, отдельный
+запрос на каждый тип (однозначный маппинг prompt → type) и `text_threshold`. Для `rtdetr` `classes`
+маппит `model.config.id2label` в наши типы. Оба новых бэкенда в этом репозитории **локально не
+запускались**: перед финалом переключать только после прогона на dev.
+
 ### Grounding DINO (запасной)
 - HF: `IDEA-Research/grounding-dino-base` / `-tiny`, Apache-2.0. Детекция по тексту, только рамки.
 - Лёгкая, работает на CPU/`mps`. Хуже различает люк и ливнёвку.
+- Реализована как `backend = "grounding_dino"` (см. таблицу выше): отдельный текстовый запрос на
+  каждый наш тип, дедупликация пересекающихся рамок по IoU 0.5.
 - Закрытые 1.6 Pro / DINO-X точнее, но только через платный API IDEA Research.
 
 ```python
