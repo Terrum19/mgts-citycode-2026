@@ -23,12 +23,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from embed import ROOT, Embedder  # noqa: E402
 from folders import load  # noqa: E402
 
-OK_WORDS = ("норм", "исправ", "без дефект", "без поврежд", "нет дефект", "ok", "good", "normal")
+OK_WORDS = ("норм", "исправ", "без дефект", "без поврежд", "нет дефект", "удовлетвор", "ok", "good", "normal")
+# «удовлетворительно» — исправен, «неудовлетворительно» — нет; отрицание проверяем раньше положительных слов.
+NOT_OK_WORDS = ("неисправ", "неудовлетвор", "не удовлетвор")
 
 
 def is_ok(defect: str) -> bool:
     normalized = defect.lower()
-    return "неисправ" not in normalized and any(w in normalized for w in OK_WORDS)
+    if any(w in normalized for w in NOT_OK_WORDS):
+        return False
+    return any(w in normalized for w in OK_WORDS)
 
 
 def make_clf(C: float = 2.0):

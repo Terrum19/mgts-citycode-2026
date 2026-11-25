@@ -7,6 +7,8 @@
  1. Train делится 80/20 по группам (как в перекрёстной проверке: связанные фото не разъезжаются).
  2. Один проход DINOv2-base 448 по train даёт и выход первых 10 блоков (для дообучения), и признаки
     [CLS, среднее по патчам] (для логрега). Qwen тем временем отвечает на 20% и test, по сети.
+    С --augment N к признакам логрега добавляются N погодных копий train-фото ([augment] config.toml):
+    хранятся только векторы, токены H/Hf не аугментируются (иначе RAM вырастает кратно).
  3. На 80% учатся логрег и дообучение 2 последних блоков. На 20% сравниваются связки:
     логрег, дообучение, их среднее, каждая ± ответ Qwen с весом w. Побеждает лучшая по macro-F1.
  4. Выбранная связка переобучается на 100% train и предсказывает test.
@@ -33,6 +35,7 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedGroupKFold
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from augment import augment, sample_seed  # noqa: E402
 from classify import groups_of, is_ok  # noqa: E402
 from embed import IMAGENET, ROOT  # noqa: E402
 from folders import IMG_EXT, TABLE_EXT, load, match_table, read_table, split_label  # noqa: E402
@@ -123,6 +126,29 @@ class Encoder:
             yield imgs
             print(f"\r  {what}: {min(s + batch, len(paths))}/{len(paths)}", end="", file=sys.stderr)
         print(file=sys.stderr)
+
+
+def augmented_features(enc, paths, y, indices, copies: int, cfg: dict, seed: int, batch: int = 16):
+    """Погодные копии фото для признаков логрега -> (Fa, ya).
+
+    Память: хранятся только векторы (n × 1536 float32), токены H/Hf не создаются — поэтому
+    аугментация дообучаемого хвоста здесь сознательно не делается (нужна отдельная оценка RAM).
+    Детерминизм: seed копии зависит только от номера фото и номера копии.
+    """
+    width = 2 * enc.model.config.hidden_size
+    if copies <= 0 or len(indices) == 0:
+        return np.empty((0, width), np.float32), np.empty(0, y.dtype)
+    feats, labels = [], []
+    for start in range(0, len(indices), batch):
+        chunk = indices[start:start + batch]
+        images = [Image.open(paths[int(i)]).convert("RGB") for i in chunk]
+        for copy in range(copies):
+            augmented = [augment(img, cfg, sample_seed(seed, int(i), copy)) for i, img in zip(chunk, images)]
+            feats.append(enc.feats(enc.frozen(augmented)))
+            labels.append(y[chunk])
+        print(f"\r  погодные признаки: {min(start + batch, len(indices))}/{len(indices)}", end="", file=sys.stderr)
+    print(file=sys.stderr)
+    return np.concatenate(feats), np.concatenate(labels)
 
 
 class Tail(torch.nn.Module):
@@ -243,6 +269,9 @@ def main():
     ap.add_argument("--epochs", type=int, default=12)
     ap.add_argument("--lr", type=float, default=2e-5)
     ap.add_argument("--C", type=float, default=32.0, help="регуляризация логрега")
+    ap.add_argument("--augment", type=int, default=0,
+                    help="погодных копий на каждое train-фото для логрега (0 — выключено; [augment] config.toml)")
+    ap.add_argument("--augment-seed", type=int, default=42)
     ap.add_argument("--val", type=float, default=0.2, help="доля train для выбора связки")
     ap.add_argument("--no-qwen", action="store_true")
     ap.add_argument("--test-format", choices=["auto", "images", "labeled"], default="auto")
@@ -289,10 +318,25 @@ def main():
     times["проход по train"] = time.time() - t
     log(f"проход по train готов ({times['проход по train'] / 60:.1f} мин)")
 
+    # 1a. Погодные копии только для признаков логрега: оригиналы остаются с индексами 0..n-1,
+    # поэтому fit/va, H/Hf и y продолжают работать без переиндексации.
+    aug_cfg, Fa_fit, ya_fit = {}, None, None
+    F_ext, y_ext, fit_ext = F, y, fit
+    if args.augment:
+        from run import load_config
+        aug_cfg = load_config().get("augment", {})
+        t = time.time()
+        Fa_fit, ya_fit = augmented_features(enc, tr_paths, y, fit, args.augment, aug_cfg, args.augment_seed)
+        F_ext = np.concatenate([F, Fa_fit])
+        y_ext = np.concatenate([y, ya_fit])
+        fit_ext = np.concatenate([fit, np.arange(len(F), len(F_ext), dtype=fit.dtype)])
+        times["признаки аугментаций"] = time.time() - t
+        log(f"погодные признаки: +{len(Fa_fit)} векторов ({times['признаки аугментаций'] / 60:.1f} мин)")
+
     # 2. Выбор связки на 20%
     t = time.time()
-    clf, _ = logreg(F, y, fit, n_cls, args.C)
-    P_lr = lr_probs(clf, F[va], n_cls)
+    clf, _ = logreg(F_ext, y_ext, fit_ext, n_cls, args.C)
+    P_lr = lr_probs(clf, F[va], n_cls)  # валидация — только оригиналы: копии не должны её завышать
     net = train_tail(enc, H, Hf, y, fit, n_cls, args.epochs, args.lr)
     P_ft = np.concatenate([tail_probs(net, H[va[s:s + 64]].to(dev)) for s in range(0, len(va), 64)])
     del net
@@ -322,7 +366,15 @@ def main():
     t = time.time()
     everything = np.arange(len(y))
     use_lr, use_ft = best["base"] in ("логрег", "логрег+дообучение"), best["base"] in ("дообучение", "логрег+дообучение")
-    clf = logreg(F, y, everything, n_cls, args.C)[0] if use_lr else None
+    clf = None
+    if use_lr:
+        if args.augment:  # теперь val законно входит в 100% train: досчитываем копии и для него
+            Fa_va, ya_va = augmented_features(enc, tr_paths, y, va, args.augment, aug_cfg, args.augment_seed)
+            F_all = np.concatenate([F, Fa_fit, Fa_va])
+            y_all = np.concatenate([y, ya_fit, ya_va])
+        else:
+            F_all, y_all = F, y
+        clf = logreg(F_all, y_all, np.arange(len(F_all)), n_cls, args.C)[0]
     net = train_tail(enc, H, Hf, y, everything, n_cls, args.epochs, args.lr) if use_ft else None
     import joblib
     # CPU tensors keep the checkpoint portable between CPU and MPS.

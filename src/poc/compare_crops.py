@@ -41,7 +41,7 @@ def main():
     if keep:
         labels = [{**r, "objects": [o for o in r["objects"] if o["type"] in keep]} for r in labels]
     preds = {"manual": {}, "joint": {}, "detector": {}}
-    model = CropDino(cfg["variants"]["boxes_dino"], None)
+    model = CropDino(cfg["variants"]["boxes_dino"], None, cfg)
     images = ROOT / ds["images"]
     for row in labels:
         name = row["file"]

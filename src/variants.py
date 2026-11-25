@@ -45,8 +45,7 @@ class DetVLM:
         self.workers = vcfg.get("workers", 2)
 
     def fingerprint(self) -> str:
-        d = self.dcfg
-        return f"{self.vlm.fingerprint()}-{d['model'].split('/')[-1]}-{d.get('min_score')}-{d.get('pad')}"
+        return f"{self.vlm.fingerprint()}-{self.det.fingerprint()}"
 
     def predict(self, img: Image.Image) -> dict:
         t0 = time.time()
@@ -86,7 +85,7 @@ def make(name: str, cfg: dict):
         return PhotoDino(vcfg)
     if kind in ("det_dino", "boxes_dino"):
         from crop_dino import CropDino
-        return CropDino(vcfg, cfg["detector"] if kind == "det_dino" else None)
+        return CropDino(vcfg, cfg["detector"] if kind == "det_dino" else None, cfg)
     if kind == "det_vlm":
         return DetVLM(vcfg, cfg)
     raise ValueError(f"неизвестный kind={kind!r} у варианта {name}")

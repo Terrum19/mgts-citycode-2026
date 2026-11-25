@@ -57,7 +57,10 @@ types = ["manhole"]   # размечены только люки: опоры н�
 
 # Детектор для варианта 1 (kind = "det_vlm"). Классы Mapillary Vistas -> наши типы.
 # "Catch Basin" (ливнёвка) намеренно не берём.
+# backend: "mask2former" (проверенный) | "grounding_dino" (open-vocabulary) | "rtdetr" (свои веса).
+# Молчаливой подмены модели нет: если backend не запустился — это ошибка, а не другой результат.
 [detector]
+backend = "mask2former"
 model = "facebook/mask2former-swin-large-mapillary-vistas-panoptic"
 classes = { "Manhole" = "manhole", "Utility Pole" = "pole", "Pole" = "pole", "Junction Box" = "cabinet" }
 min_score = 0.5
@@ -66,6 +69,35 @@ pad = 0.2            # запас вокруг объекта при вырез�
 crop_min_side = 160
 shortest_edge = 800  # вход детектора; больше — точнее на мелких люках, но медленнее
 device = "cpu"       # "mps" на маке, "cuda" при наличии
+
+# Запасной бэкенд open-vocabulary (лицензия Apache-2.0, видит aerial_equipment, но чаще путает
+# люк и ливнёвку: нецелевое отсекается на 2-м уровне каскада по is_object). Локально не проверялся.
+# Раскомментировать ЦЕЛИКОМ вместо блока выше (TOML не допускает двух [detector]):
+# backend = "grounding_dino"
+# model = "IDEA-Research/grounding-dino-tiny"
+# min_score = 0.30
+# text_threshold = 0.25
+# prompts = { manhole = "manhole cover. cable manhole.", pole = "utility pole. street light pole.", cabinet = "street utility cabinet. electrical cabinet.", aerial_equipment = "cable splice closure. cable coil on pole." }
+# classes = { "Manhole" = "manhole", "Utility Pole" = "pole", "Junction Box" = "cabinet" }
+# min_side = 12
+# device = "cpu"
+
+# Погодные аугментации: применяются только к train (после сплита), валидация и тест — оригиналы.
+# Используются в crop_dino.py (train) и final.py --augment; включение — в секции варианта.
+[augment]
+brightness = [0.75, 1.25]    # пасмурно / засвет фар / глубокие тени
+contrast = [0.75, 1.25]
+saturation = [0.70, 1.30]    # мокрый асфальт, жёлтый свет фонарей, серый снег
+color_gain = 0.08            # сдвиг баланса белого по каналам
+blur_prob = 0.20             # капли/грязь на стекле
+blur_radius = [0.3, 1.0]
+motion_prob = 0.20           # смаз от движения машины
+motion_length = [3, 9]
+motion_angle = [-30.0, 30.0]
+noise_prob = 0.25            # дешёвый видеорегистратор в сумерках
+noise_std = [2.0, 8.0]       # единицы 8-bit RGB
+jpeg_prob = 0.20
+jpeg_quality = [60, 90]
 
 # Варианты = модель + endpoint. Ключ берётся из переменной окружения / .env по имени key_env.
 [variants.qwen235]
@@ -114,14 +146,49 @@ size = 224
 pad = 0.2
 crop_min_side = 96
 class_policy = "detector"
-min_confidence = 0.55
+min_confidence = 0.55   # только для cascade = false; в каскаде пороги ниже
+
+# Каскад: быстрый DINOv2 решает сам, VLM — только спорные объекты и описания подтверждённых bad.
+# Пороги стартовые: подбирать на dev, не на test.
+cascade = true
+vlm = "qwen235"         # нет ключа/сети -> спорное уходит в review.csv, без падения
+p_bad_min = 0.60        # суммарная P(bad) >= -> bad
+p_bad_max_ok = 0.40     # суммарная P(bad) <= -> ok; между p_bad_max_ok и p_bad_min — серая зона
+status_conf_min = 0.65  # max(P(ok), P(bad)) меньше -> review
+margin_min = 0.10       # |P(bad) - P(ok)| меньше -> review
+describe_bad = true     # VLM пишет description для подтверждённых bad (их в разы меньше, чем ok)
+not_target = "drop"     # VLM: is_object = false -> убрать находку детектора
+min_support = 2         # класс с меньшим числом ОРИГИНАЛОВ сам подтвердить результат не может
+
+# Погодные копии при обучении: rare bad аугментируется сильнее, support считается по оригиналам.
+augment = true
+augment_copies = 1
+augment_rare_bad_copies = 3
+augment_rare_threshold = 20
+augment_seed = 42
 
 [variants.boxes_dino]
 kind = "boxes_dino"
 checkpoint = "weights/crop_dino.joblib"
 class_policy = "detector"
-min_confidence = 0.55
+min_confidence = 0.55   # только для cascade = false
+cascade = true
+vlm = "qwen235"
+p_bad_min = 0.60
+p_bad_max_ok = 0.40
+status_conf_min = 0.65
+margin_min = 0.10       # |P(bad) - P(ok)| меньше -> review
+describe_bad = true
+not_target = "review"   # рамки организатора молча удалять нельзя: спорное -> ручная проверка
+min_support = 2
 
 [variants.photo_dino]
 kind = "photo_dino"
 checkpoint = "out/final/photo_dino.joblib"
+qwen = "qwen235"        # было забыто: VLM в photo_dino молча не включалась
+cascade = true          # VLM только на спорные кадры и описания bad, а не на каждое фото
+p_bad_min = 0.60
+p_bad_max_ok = 0.40
+status_conf_min = 0.65
+margin_min = 0.10       # |P(bad) - P(ok)| меньше -> review
+describe_bad = true

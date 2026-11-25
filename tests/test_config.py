@@ -1,0 +1,90 @@
+"""config.toml: ссылки вариантов, пороги каскада, аугментации и совместимость со старым конфигом."""
+import sys
+import tomllib
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+import augment  # noqa: E402
+import cascade  # noqa: E402
+import detector  # noqa: E402
+
+CFG = tomllib.loads((ROOT / "config.toml").read_text(encoding="utf-8"))
+VARIANTS = CFG["variants"]
+
+
+class ConfigTest(unittest.TestCase):
+    def test_required_sections(self):
+        for section in ("taxonomy", "names", "detector", "augment", "variants"):
+            self.assertIn(section, CFG)
+
+    def test_detector_default_is_proven_backend(self):
+        # финальный сценарий не должен по умолчанию зависеть от непроверенных весов
+        self.assertEqual(detector.backend_name(CFG["detector"]), "mask2former")
+        self.assertIn("model", CFG["detector"])
+        self.assertIn("classes", CFG["detector"])
+
+    def test_vlm_references_exist(self):
+        for name, variant in VARIANTS.items():
+            for key in ("vlm", "qwen"):
+                if key in variant:
+                    with self.subTest(variant=name, key=key):
+                        self.assertIn(variant[key], VARIANTS,
+                                      f"{name}.{key}={variant[key]} нет в [variants]")
+
+    def test_photo_dino_has_qwen(self):
+        # исходный баг: без ключа qwen VLM в photo_dino молча выключалась
+        self.assertIn("qwen", VARIANTS["photo_dino"])
+        self.assertTrue(VARIANTS["photo_dino"]["cascade"])
+
+    def test_cascade_thresholds(self):
+        for name in ("det_dino", "boxes_dino", "photo_dino"):
+            variant = VARIANTS[name]
+            with self.subTest(variant=name):
+                self.assertTrue(variant["cascade"])
+                self.assertLessEqual(variant["p_bad_max_ok"], variant["p_bad_min"])
+                self.assertTrue(0 < variant["p_bad_min"] <= 1)
+                self.assertTrue(0 <= variant["p_bad_max_ok"] <= 1)
+                self.assertTrue(0 < variant["status_conf_min"] <= 1)
+                self.assertTrue(0 <= variant["margin_min"] < 1)
+                self.assertIn(variant.get("not_target", "review"), ("drop", "review"))
+
+    def test_crop_variants_reference_existing_classes(self):
+        self.assertIn(VARIANTS["det_dino"]["vlm"], VARIANTS)
+        self.assertIn(VARIANTS["boxes_dino"]["vlm"], VARIANTS)
+
+    def test_augment_section_complete(self):
+        self.assertEqual(set(CFG["augment"]), set(augment.DEFAULTS))
+        for key in ("brightness", "contrast", "saturation", "blur_radius", "noise_std", "jpeg_quality"):
+            low, high = CFG["augment"][key]
+            with self.subTest(key=key):
+                self.assertLessEqual(low, high)
+
+    def test_augment_toggle(self):
+        self.assertTrue(VARIANTS["det_dino"]["augment"])
+        self.assertLessEqual(1, VARIANTS["det_dino"]["augment_rare_bad_copies"])
+
+
+class LegacyCompatibilityTest(unittest.TestCase):
+    """Конфиг без новых ключей обязан вести себя как прежний код."""
+
+    def test_detector_default(self):
+        self.assertEqual(detector.backend_name({}), "mask2former")
+
+    def test_augment_off_by_default(self):
+        self.assertFalse(VARIANTS.get("photo_dino", {}).get("augment", False))
+        self.assertEqual(augment.n_copies("bad", 1, {"checkpoint": "x"}), 0)
+
+    def test_cascade_off_by_default(self):
+        # без cascade решение принимает прежняя ветка CropDino по min_confidence
+        self.assertFalse({"checkpoint": "x"}.get("cascade", False))
+
+    def test_decide_needs_cfg_only(self):
+        summary = {"ready": True, "status_confidence": 0.9, "margin": 0.5, "p_bad": 0.8}
+        self.assertEqual(cascade.decide(summary, {}), "bad")
+
+
+if __name__ == "__main__":
+    unittest.main()

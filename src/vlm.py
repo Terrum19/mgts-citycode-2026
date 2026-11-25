@@ -16,6 +16,8 @@ from pathlib import Path
 import requests
 from PIL import Image
 
+from cascade import clean_state  # noqa: F401 — оставляем прежний импорт from vlm import clean_state
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -92,15 +94,6 @@ def parse(text: str) -> list[dict] | None:
     data = parse_json(text)
     objs = data.get("objects") if data else None
     return objs if isinstance(objs, list) else None
-
-
-def clean_state(o: dict, tax: dict) -> tuple[str, str | None]:
-    """status/damage к допустимым значениям: bad без вида из списка -> damage "unknown"."""
-    status = "bad" if str(o.get("status", "")).lower() == "bad" else "ok"
-    damage = o.get("damage") if status == "bad" else None
-    if status == "bad" and damage not in tax["damage"]:
-        damage = "unknown"
-    return status, damage
 
 
 def normalize(objs: list, w: int, h: int, tax: dict) -> list[dict]:
