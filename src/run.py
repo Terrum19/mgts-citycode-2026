@@ -24,8 +24,9 @@ from draw import annotate  # noqa: E402
 from evaluate import evaluate, load_labels  # noqa: E402
 from vlm import ROOT  # noqa: E402
 
-ROWS = ["repair_tp", "repair_fp", "repair_fn", "repair_precision", "repair_recall", "review_objects", "images", "gt_objects", "gt_bad_objects", "det_precision", "det_recall", "det_precision@0.3",
-        "det_recall@0.3", "det_recall_anytype", "img_bad_recall", "img_bad_precision", "obj_bad_recall",
+ROWS = ["repair_tp", "repair_fp", "repair_fn", "repair_precision", "repair_recall", "review_objects", "images", "gt_objects", "gt_bad_objects", "det_precision", "det_recall",
+        "det_precision@0.5", "det_recall@0.5", "det_precision@0.3", "det_recall@0.3",
+        "det_recall_anytype", "img_bad_recall", "img_bad_precision", "obj_bad_recall",
         "obj_bad_precision", "damage_acc", "bad_json_rate", "error_rate", "sec_per_image", "cost_usd"]
 
 
@@ -66,7 +67,7 @@ def run_one(vname: str, dname: str, cfg: dict, review: int) -> dict:
         keep = set(ds["types"])
         labels = [{**lab, "objects": [o for o in lab["objects"] if o["type"] in keep]} for lab in labels]
         preds = {f: {**p, "objects": [o for o in p["objects"] if o["type"] in keep]} for f, p in preds.items()}
-    m = evaluate(labels, preds, ds.get("iou", 0.5))
+    m = evaluate(labels, preds, ds.get("iou"))
     (out / "metrics.json").write_text(json.dumps(m, ensure_ascii=False, indent=1))
     if review:
         rdir = out / "review"
@@ -92,6 +93,7 @@ def main() -> None:
     for dname in args.data:
         res = {v: run_one(v, dname, cfg, args.review) for v in args.variant}
         print(f"\n=== {dname}")
+        print("Правило сопоставления:", next(iter(res.values()))["matching"])
         print("metric".ljust(20) + "".join(v[:15].rjust(16) for v in res))
         for k in ROWS:
             print(k.ljust(20) + "".join((f"{r[k]:16.3f}" if isinstance(r[k], float) else f"{r[k]:16d}") for r in res.values()))

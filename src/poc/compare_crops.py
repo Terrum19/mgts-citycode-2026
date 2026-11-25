@@ -62,7 +62,7 @@ def main():
         if keep:
             result = {name: {**p, "objects": [o for o in p["objects"] if o["type"] in keep]}
                       for name, p in result.items()}
-        metrics[variant] = evaluate(labels, result, ds.get("iou", 0.5))
+        metrics[variant] = evaluate(labels, result, ds.get("iou"))
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
 
