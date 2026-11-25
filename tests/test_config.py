@@ -54,6 +54,8 @@ class ConfigTest(unittest.TestCase):
     def test_crop_variants_reference_existing_classes(self):
         self.assertIn(VARIANTS["det_dino"]["vlm"], VARIANTS)
         self.assertIn(VARIANTS["boxes_dino"]["vlm"], VARIANTS)
+        self.assertIn(VARIANTS["det_qwen235"].get("context_mode", "crop"), ("crop", "context", "both"))
+        self.assertIn("Pole", CFG["detector"]["classes"])
 
     def test_augment_section_complete(self):
         self.assertEqual(set(CFG["augment"]), set(augment.DEFAULTS))

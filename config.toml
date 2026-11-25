@@ -100,17 +100,20 @@ jpeg_prob = 0.20
 jpeg_quality = [60, 90]
 
 # Варианты = модель + endpoint. Ключ берётся из переменной окружения / .env по имени key_env.
+# bbox_format = "xyxy" (Qwen и др.) | "yxyx" (Gemma/Gemini; подставляется и автоматически по имени модели).
 [variants.qwen235]
 base_url = "https://openrouter.ai/api/v1"
 model = "qwen/qwen3-vl-235b-a22b-instruct"
 key_env = "OPENROUTER_API_KEY"
 workers = 6
+prompt_mode = "recall"
 
 [variants.gemma31_free]
 base_url = "https://openrouter.ai/api/v1"
 model = "google/gemma-4-31b-it:free"
 key_env = "OPENROUTER_API_KEY"
 workers = 2
+bbox_format = "yxyx"
 
 [variants.nemotron_free]
 base_url = "https://openrouter.ai/api/v1"
@@ -130,12 +133,29 @@ workers = 1
 base_url = "https://openrouter.ai/api/v1"
 model = "google/gemma-4-31b-it"
 key_env = "OPENROUTER_API_KEY"
+workers = 2
+bbox_format = "yxyx"
+
+# Быстрая MoE-версия Gemma 4 (26B всего / 4B активных)
+[variants.gemma26]
+base_url = "https://openrouter.ai/api/v1"
+model = "google/gemma-4-26b-a4b-it"
+key_env = "OPENROUTER_API_KEY"
+workers = 2
+bbox_format = "yxyx"
+
+# Qwen3.8-27B (dense, 0..1000 grounding)
+[variants.qwen38]
+base_url = "https://openrouter.ai/api/v1"
+model = "qwen/qwen3.8-27b"
+key_env = "OPENROUTER_API_KEY"
 workers = 6
 
-# Вариант 1: детектор -> вырез -> VLM (статус по вырезу)
+# Вариант 1: детектор -> полный кадр с рамкой + вырез -> VLM
 [variants.det_qwen235]
 kind = "det_vlm"
 vlm = "qwen235"
+context_mode = "both"
 workers = 4
 
 [variants.det_dino]

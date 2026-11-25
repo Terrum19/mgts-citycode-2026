@@ -6,12 +6,14 @@
 
 Объект в ответе: {"type", "bbox": [x1,y1,x2,y2] px, "status": "ok|bad", "damage", "description"}.
 """
+import hashlib
 import time
 
 from PIL import Image
 
 from detector import crop_box
-from vlm import VLM, clean_state
+from draw import highlight_box
+from vlm import VLM, build_context_crop_prompt, clean_state
 
 _detector = None  # тяжёлая модель: одна на процесс
 
@@ -36,16 +38,27 @@ class VLMOnly:
         return self.vlm.predict(img)
 
 
+CONTEXT_MODES = ("crop", "context", "both")
+
+
 class DetVLM:
     def __init__(self, vcfg: dict, cfg: dict):
         self.dcfg = cfg["detector"]
         self.tax = cfg["taxonomy"]
+        self.context_mode = vcfg.get("context_mode", "crop")
+        if self.context_mode not in CONTEXT_MODES:
+            raise ValueError(f"неизвестный context_mode={self.context_mode!r}, допустимы {CONTEXT_MODES}")
         self.det = get_detector(self.dcfg)
         self.vlm = VLM(cfg["variants"][vcfg["vlm"]], self.tax)
         self.workers = vcfg.get("workers", 2)
 
     def fingerprint(self) -> str:
-        return f"{self.vlm.fingerprint()}-{self.det.fingerprint()}"
+        base = f"{self.vlm.fingerprint()}-{self.det.fingerprint()}"
+        if self.context_mode == "crop":
+            return base
+        ctx_prompt = build_context_crop_prompt(self.tax, "", has_crop=self.context_mode == "both")
+        tag = hashlib.sha1((self.context_mode + ctx_prompt).encode()).hexdigest()[:8]
+        return f"{base}-{tag}"
 
     def predict(self, img: Image.Image) -> dict:
         t0 = time.time()
@@ -56,7 +69,11 @@ class DetVLM:
         out = {"objects": [], "bad_json": False, "error": None, "cost": 0.0, "detections": found}
         for d in found:
             box = crop_box(d["bbox"], w, h, self.dcfg.get("pad", 0.2), self.dcfg.get("crop_min_side", 96))
-            r = self.vlm.classify_crop(img.crop(box), d["type"])
+            if self.context_mode == "crop":
+                r = self.vlm.classify_crop(img.crop(box), d["type"])
+            else:
+                crop_img = img.crop(box) if self.context_mode == "both" else None
+                r = self.vlm.classify_crop_in_context(highlight_box(img, d["bbox"]), crop_img, d["type"])
             out["cost"] += r["cost"]
             out["error"] = out["error"] or r["error"]
             a = r["answer"]

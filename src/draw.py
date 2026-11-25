@@ -50,3 +50,16 @@ def annotate(img: Image.Image, objects: list[dict], gt: list[dict] | None = None
         x, y = (4, 4) if box is None else (box[0], max(0, box[1] - f.size - 4))
         d.text((x, y), tag, fill=color, font=f, stroke_width=2, stroke_fill="black")
     return img
+
+
+def highlight_box(img: Image.Image, box: list[int] | tuple[int, int, int, int],
+                  color: tuple[int, int, int] = (255, 0, 180)) -> Image.Image:
+    """Обвести целевой объект яркой рамкой снаружи границ (не закрывая края опоры или люка)."""
+    out = img.convert("RGB").copy()
+    w, h = out.size
+    lw = max(3, round(max(w, h) / 350))
+    pad = max(2, round(max(w, h) / 400))
+    x1, y1, x2, y2 = (int(round(v)) for v in box)
+    rect = (max(0, x1 - pad), max(0, y1 - pad), min(w - 1, x2 + pad), min(h - 1, y2 + pad))
+    ImageDraw.Draw(out).rectangle(rect, outline=color, width=lw)
+    return out
