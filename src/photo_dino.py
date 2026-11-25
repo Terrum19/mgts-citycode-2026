@@ -1,60 +1,97 @@
 """Inference on new photos from the checkpoint saved by final.py.
 
-Два режима (ключ `cascade` в варианте):
-  * cascade = false — прежний: среднее DINO-голов, плюс ответ Qwen как добавка с весом
-    `qwen_weight` (VLM вызывается на КАЖДЫЙ кадр);
-  * cascade = true — быстрый DINO решает по суммарной P(bad), уверенности статуса и margin;
-    VLM вызывается только на спорные кадры (и на описание подтверждённых bad при
-    `describe_bad = true`). Нет ключа/сети — спорный кадр уходит в status="review", а
-    подтверждённый bad не теряется из-за необязательного описания.
+Результат — кадровый (frame), а не псевдообъект с bbox=None: у PhotoDino нет локализации,
+и выдавать рамку на весь кадр было бы фабрикацией. Решение принимает общая policy
+(`src/policy.py`): legacy-argmax или каскад; VLM только на спорные кадры и description для
+подтверждённых bad. Ошибка VLM не понижает подтверждённый bad.
 """
 import hashlib
 import json
 import time
+import warnings
 
 import joblib
 import numpy as np
 
-from cascade import decide, vlm_ready
+from cascade import vlm_ready
+from config_utils import check_offline_vlm, is_offline, resolve_variant
 from embed import ROOT
 from final import Encoder, Tail, pick_device, lr_probs, tail_probs
 from folders import split_label
+from policy import effective_policy, finalize, initial
+from results import make_result
+from taxonomy import validate_checkpoint
 
 
 class PhotoDino:
     workers = 1
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, root_cfg=None):
         path = ROOT / cfg["checkpoint"]
         with path.open("rb") as checkpoint:
             self.signature = hashlib.file_digest(checkpoint, "sha256").hexdigest()
         self.state = state = joblib.load(path)
-        self.cfg = cfg
-        self.cascade = bool(cfg.get("cascade", False))
+        self.cfg = dict(cfg)
+        self.tax = (root_cfg or {}).get("taxonomy") or {}
+        self.offline = is_offline(cfg, root_cfg)
+        legacy = "error" if self.offline or cfg.get("strict_checkpoint") else cfg.get("legacy_checkpoint", "warn")
+        validate_checkpoint(state, self.tax, legacy=legacy)
+        self.classes = list(state["classes"])
+        self.triples = []
+        for label in self.classes:
+            typ, defect = split_label(label, None)
+            ok = bool(state["ok"][label])
+            self.triples.append([typ, "ok" if ok else "bad", defect or None])
+        self.policy = effective_policy(state.get("policy"), cfg)
+        self.cascade = bool(self.policy.get("cascade", cfg.get("cascade", False)))
+        self.policy["cascade"] = self.cascade
+        self.policy["mode"] = "cascade" if self.cascade else "legacy"
+        self.hint_mode = str(self.policy.get("hint_mode", "none"))
+        if self.hint_mode != "none":
+            raise ValueError("PhotoDino поддерживает только hint_mode='none'")
+
+        saved_qwen = state.get("qwen_variant", None)
+        wanted_qwen = str(cfg.get("qwen") or "")
+        if saved_qwen is not None and saved_qwen != wanted_qwen:
+            if saved_qwen == "":
+                raise ValueError("Checkpoint обучен offline (без VLM), а вариант требует qwen; "
+                                 "выберите photo_dino_offline или переобучите checkpoint.")
+            raise ValueError(f"Checkpoint привязан к qwen={saved_qwen!r}, а вариант просит {wanted_qwen!r}. "
+                             "Переобучите checkpoint или задайте тот же qwen.")
+        if saved_qwen is None and wanted_qwen:
+            warnings.warn("Legacy checkpoint без qwen_variant: связка с VLM не проверена", RuntimeWarning,
+                          stacklevel=2)
+        self.qwen_variant = wanted_qwen
+        self.vlm = None
+        # в каскаде VLM нужна и при qwen_weight = 0: она разрешает спорные кадры
+        if wanted_qwen and (self.cascade or float(self.policy.get("qwen_weight", 0.0) or 0.0) > 0):
+            check_offline_vlm(root_cfg or {}, self.policy, self.offline)
+            from vlm import VLM
+            self.vlm = VLM(resolve_variant(root_cfg or self._root_cfg(), wanted_qwen), self.tax)
+        self.vlm_ok, self.vlm_reason = vlm_ready(self.vlm)
+
         device = pick_device(cfg.get("device", "auto"))
-        self.encoder = Encoder(device, state["size"], state["k"])
+        self.encoder = Encoder(device, state["size"], state["k"], offline=self.offline)
         self.tail = None
         if state["tail"] is not None:
             self.tail = Tail(self.encoder.model, self.encoder.cut, len(state["classes"])).to(device).eval()
             self.tail.load_state_dict(state["tail"])
-        self.vlm = None
-        # в каскаде VLM нужна и при qwen_weight = 0: она разрешает спорные кадры
-        if cfg.get("qwen") and (self.cascade or state["qwen_weight"]):
-            from run import load_config
-            from vlm import VLM
-            config = load_config()
-            self.vlm = VLM(config["variants"][cfg["qwen"]], config["taxonomy"])
-        self.vlm_ok, self.vlm_reason = vlm_ready(self.vlm)
+        self.device = device
+
+    def _root_cfg(self):
+        from run import load_config
+        return load_config()
 
     def fingerprint(self):
-        """Меняется при смене режима/порогов/VLM: старые предсказания в кэше не переиспользуются."""
-        relevant = {key: self.cfg.get(key) for key in
-                    ("cascade", "qwen", "p_bad_min", "p_bad_max_ok", "status_conf_min",
-                     "margin_min", "describe_bad", "device")}
-        tag = json.dumps(relevant, sort_keys=True)
+        """Меняется при смене checkpoint/политики/порогов/VLM: кэш не переиспользуется."""
+        relevant = {
+            "checkpoint": self.signature, "policy": self.policy, "qwen": self.qwen_variant,
+            "hint_mode": self.hint_mode, "device": self.cfg.get("device"),
+        }
+        tag = json.dumps(relevant, sort_keys=True, default=str)
         if self.vlm is not None:
             tag += self.vlm.fingerprint()
-        return f"photo-dino-{self.signature}-{hashlib.sha1(tag.encode()).hexdigest()[:8]}"
+        return f"photo-dino-v3-{hashlib.sha256(tag.encode()).hexdigest()[:12]}"
 
     def predict(self, img):
         start = time.monotonic()
@@ -66,62 +103,35 @@ class PhotoDino:
         if self.tail is not None:
             scores.append(tail_probs(self.tail, h)[0])
         p = np.mean(scores, axis=0)
-        return self._cascade(img, p, start) if self.cascade else self._legacy(img, p, start)
-
-    def _legacy(self, img, p, start):
-        state = self.state
-        classes = state["classes"]
-        answer = {}
-        if self.vlm:
-            from vlm_classify import classify
-            answer = classify(self.vlm, img, classes)
-            if answer.get("label") in classes:
-                p[classes.index(answer["label"])] += state["qwen_weight"]
-        label = classes[int(p.argmax())]
-        typ, defect = split_label(label, None)
-        status = "ok" if state["ok"][label] else "bad"
-        return {"objects": [{"type": typ, "bbox": None, "status": status,
-                             "damage": defect if status == "bad" else None,
-                             "description": answer.get("description", "")}],
-                "seconds": time.monotonic() - start, "cost": answer.get("cost") or 0,
-                "bad_json": answer.get("bad_json", False), "error": answer.get("error")}
-
-    def _cascade(self, img, p, start):
-        state = self.state
-        classes = state["classes"]
-        order = np.argsort(-p)
-        # как в Cascade.summarize: считаем внутри типа лучшего класса, иначе массы люков и опор
-        # складывались бы в искусственно высокую P(bad)
-        kinds = [split_label(cls, None)[0] for cls in classes]
-        selected = [i for i, kind in enumerate(kinds) if kind == kinds[int(order[0])]]
-        good = [i for i in selected if state["ok"][classes[i]]]
-        broken = [i for i in selected if not state["ok"][classes[i]]]
-        p_bad = float(p[broken].sum()) if broken else 0.0
-        p_ok = float(p[good].sum()) if good else 0.0
-        summary = {"p_bad": p_bad, "p_ok": p_ok, "status_confidence": max(p_bad, p_ok),
-                   "margin": abs(p_bad - p_ok), "ready": bool(broken and good)}
-        decision = decide(summary, self.cfg)
-        hint = [[classes[int(j)], float(p[j])] for j in order[:3]]  # топ-3 как подсказка VLM
-        answer = {"label": None, "description": "", "cost": 0.0, "bad_json": False, "error": None}
-        describe = decision == "bad" and bool(self.cfg.get("describe_bad"))
-        if self.vlm_ok and (decision == "review" or describe):
+        mode = "cascade" if self.cascade else "legacy"
+        decision = initial(self.classes, self.triples, [float(x) for x in p], mode=mode,
+                           cfg=self.policy, support=None, type_hint=None,
+                           class_policy=str(self.policy.get("class_policy", "detector")))
+        answer = {"label": None, "description": "", "cost": 0.0, "bad_json": False, "error": None,
+                  "review": False}
+        if decision.get("needs_vlm") and self.vlm_ok:
             try:
                 from vlm_classify import classify
-                answer = classify(self.vlm, img, classes, hint=hint)
-            except Exception as e:  # noqa: BLE001 — сбой сети/ключа не должен ронять кадр
-                answer = {**answer, "error": str(e)[:300]}
-        if decision == "review":
-            label = answer.get("label") if answer.get("label") in classes else classes[int(order[0])]
-            status = ("ok" if state["ok"][label] else "bad") if answer.get("label") in classes else "review"
-        elif decision == "bad":
-            label, status = classes[max(broken, key=lambda i: float(p[i]))], "bad"
-        else:
-            label, status = classes[max(good, key=lambda i: float(p[i]))], "ok"
-        typ, defect = split_label(label, None)
-        obj = {"type": typ, "bbox": None, "status": status,
-               "damage": defect if status == "bad" else None,
-               "description": answer.get("description") or ""}
-        if status == "review" and self.vlm_reason:
-            obj["vlm_error"] = self.vlm_reason
-        return {"objects": [obj], "seconds": time.monotonic() - start, "cost": answer.get("cost") or 0,
-                "bad_json": answer.get("bad_json", False), "error": answer.get("error")}
+                answer = classify(self.vlm, img, self.classes, hint=None)
+            except Exception as exc:  # noqa: BLE001 — сбой сети/ключа не должен ронять кадр
+                answer = {**answer, "error": str(exc)[:300]}
+        elif decision.get("needs_vlm") and self.vlm_reason:
+            answer = {**answer, "error": self.vlm_reason}
+        vlm_norm = {
+            "available": self.vlm_ok, "label": answer.get("label"), "answer": None,
+            "description": str(answer.get("description") or ""), "error": answer.get("error"),
+            "bad_json": bool(answer.get("bad_json")), "review": bool(answer.get("review")),
+        }
+        out = finalize(decision, cfg=self.policy, tax=self.tax, vlm=vlm_norm)
+        if out is None:  # PhotoDino не выбрасывает кадр: это не детекция с чужой рамкой
+            out = {"status": "review", "type": None, "damage": None, "description": "",
+                   "review_reasons": ["not_target"], "review": True}
+        frame = {
+            "status": out["status"], "type": out.get("type"), "damage": out.get("damage"),
+            "description": out.get("description", ""), "review": out["status"] == "review",
+            "review_reasons": out.get("review_reasons", []), "source": "native",
+        }
+        return make_result(frame=frame, objects=[], scope="frame",
+                           seconds=time.monotonic() - start,
+                           cost=float(answer.get("cost") or 0.0),
+                           bad_json=bool(answer.get("bad_json")), error=answer.get("error"))

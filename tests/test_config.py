@@ -29,7 +29,7 @@ class ConfigTest(unittest.TestCase):
     def test_vlm_references_exist(self):
         for name, variant in VARIANTS.items():
             for key in ("vlm", "qwen"):
-                if key in variant:
+                if key in variant and variant[key]:
                     with self.subTest(variant=name, key=key):
                         self.assertIn(variant[key], VARIANTS,
                                       f"{name}.{key}={variant[key]} нет в [variants]")
@@ -67,6 +67,36 @@ class ConfigTest(unittest.TestCase):
     def test_augment_toggle(self):
         self.assertTrue(VARIANTS["det_dino"]["augment"])
         self.assertLessEqual(1, VARIANTS["det_dino"]["augment_rare_bad_copies"])
+
+
+class NewSectionsTest(unittest.TestCase):
+    def test_selection_cost_quality_app(self):
+        for section in ("selection", "cost", "quality_gate", "app"):
+            self.assertIn(section, CFG)
+        self.assertFalse(CFG["quality_gate"]["enabled"])  # некалиброванный gate выключен
+        self.assertTrue(CFG["app"]["offline_map"])
+        self.assertGreaterEqual(CFG["cost"]["fn"], CFG["cost"]["fp"])
+
+    def test_offline_and_local_variants_resolve(self):
+        import config_utils
+        offline = config_utils.resolve_variant(CFG, "det_dino_offline")
+        self.assertEqual(offline["vlm"], "")
+        self.assertTrue(offline["offline"])
+        local = config_utils.resolve_variant(CFG, "photo_dino_local")
+        self.assertEqual(local["qwen"], "qwen8b_local")
+        self.assertIn("boxes_vlm", {config_utils.resolve_variant(CFG, n).get("kind", "vlm")
+                                    for n in VARIANTS})
+        self.assertEqual(VARIANTS["qwen8b_local"]["prompt_mode"], "recall")
+
+    def test_photo_dino_hint_is_none(self):
+        self.assertEqual(VARIANTS["photo_dino"]["hint_mode"], "none")
+
+    def test_vlm_variant_policies(self):
+        self.assertEqual(VARIANTS["det_qwen235"]["not_target"], "drop")
+        self.assertEqual(VARIANTS["boxes_qwen235"]["not_target"], "review")
+        self.assertEqual(VARIANTS["boxes_dino"]["not_target"], "review")
+        self.assertEqual(VARIANTS["gemma26"].get("prompt_mode", "default"), "default")
+        self.assertEqual(VARIANTS["qwen235"]["prompt_mode"], "recall")
 
 
 class LegacyCompatibilityTest(unittest.TestCase):

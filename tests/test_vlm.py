@@ -20,7 +20,7 @@ except ModuleNotFoundError:
     vlm = None
 
 TAX = {
-    "object_types": {"manhole": "люк"},
+    "object_types": {"manhole": "люк", "pole": "опора"},
     "damage": {"cover_broken": "сломана"},
 }
 
@@ -246,6 +246,144 @@ class ContextAndDetVLMTest(unittest.TestCase):
         self.assertEqual(hint_arg, "pole")
         self.assertEqual(len(res["objects"]), 1)
         self.assertEqual(res["objects"][0]["status"], "ok")
+
+
+@unittest.skipIf(vlm is None, "нужен requests/PIL")
+class ReviewPromptAndBoxesTest(unittest.TestCase):
+    def test_crop_and_context_prompts_have_recall_mode_without_review_by_default(self):
+        default = vlm.build_crop_prompt(TAX, "manhole")
+        recall = vlm.build_crop_prompt(TAX, "manhole", prompt_mode="recall")
+        self.assertNotIn('"review"', default)
+        self.assertNotIn('"review"', recall)
+        self.assertNotIn("ok|bad|review", recall)
+        ctx = vlm.build_context_crop_prompt(TAX, "pole", prompt_mode="recall")
+        self.assertNotIn("ok|bad|review", ctx)
+
+        crop_rev = vlm.build_crop_prompt(TAX, "manhole", prompt_mode="recall", allow_review=True)
+        ctx_rev = vlm.build_context_crop_prompt(TAX, "pole", prompt_mode="recall", allow_review=True)
+        self.assertIn("ok|bad|review", crop_rev)
+        self.assertIn("ok|bad|review", ctx_rev)
+        self.assertIn("подозрительный признак дефекта", crop_rev)
+        self.assertIn("подозрительный признак дефекта", ctx_rev)
+        with self.assertRaises(ValueError):
+            vlm.build_crop_prompt(TAX, "manhole", prompt_mode="bad")
+
+    def test_anti_fp_and_strict_bad_prompts(self):
+        p = vlm.build_prompt(TAX, prompt_mode="recall")
+        self.assertIn("декоративных чугунных кожухов", p)
+        self.assertIn("лужи, грязь, тени", p)
+        ctx = vlm.build_context_crop_prompt(TAX, "pole")
+        self.assertIn("декоративных чугунных кожухов", ctx)
+        self.assertIn("лужи, грязь", ctx.lower())
+
+        c_strict = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m"}, TAX)
+        c_sens = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m", "strict_bad": False}, TAX)
+        self.assertIn("отслоение краски", c_sens.prompt)
+        self.assertNotEqual(c_strict.fingerprint(), c_sens.fingerprint())
+
+    def test_allow_review_and_defaults_affect_fingerprint_and_requests(self):
+        a = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m"}, TAX)
+        b = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m", "allow_review": True}, TAX)
+        self.assertNotIn("ok|bad|review", a.prompt)
+        self.assertIn("ok|bad|review", b.prompt)
+        self.assertIn("подозрительный признак дефекта", b.prompt)
+        self.assertNotEqual(a.fingerprint(), b.fingerprint())
+        self.assertEqual(a.max_tokens, 2000)
+        self.assertEqual(a.timeout, 60)
+        self.assertEqual(a._body(b"jpeg", "p")["max_tokens"], 2000)
+
+    def test_fingerprint_includes_resolution_and_context(self):
+        a = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m"}, TAX)
+        b = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m", "max_side": 800}, TAX)
+        c = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m", "context_max_side": 700}, TAX)
+        self.assertNotEqual(a.fingerprint(), b.fingerprint())
+        self.assertNotEqual(a.fingerprint(), c.fingerprint())
+
+    def test_normalize_keeps_unknown_status_as_review(self):
+        invalid = []
+        out = vlm.normalize([{"type": "manhole", "bbox": [0, 0, 10, 10], "status": "maybe"}],
+                            100, 100, TAX, bbox_format="yxyx", invalid_bbox_objects=invalid)
+        self.assertEqual(out[0]["status"], "review")
+        self.assertEqual(out[0]["review_reasons"], ["low_confidence"])
+        self.assertEqual(invalid, [])
+
+    def test_boxes_vlm_keeps_organizer_frame_on_not_object(self):
+        root = {"taxonomy": TAX, "detector": {"pad": 0.2, "crop_min_side": 20},
+                "variants": {
+                    "v": {"base_url": "http://localhost:8080/v1", "model": "custom/vlm"},
+                    "b": {"kind": "boxes_vlm", "vlm": "v", "context_mode": "crop",
+                          "not_target": "review"},
+                }}
+        model = variants.make("b", root)
+        img = Image.new("RGB", (100, 100), (10, 10, 10))
+        with mock.patch.object(model.vlm, "classify_crop",
+                               return_value={"answer": {"is_object": False, "description": "решётка"},
+                                             "error": None, "bad_json": False, "cost": 0.0}):
+            res = model.predict(img, boxes=[{"type": "manhole", "bbox": [10, 10, 30, 30],
+                                             "object_id": "org-1"}])
+        self.assertEqual(len(res["objects"]), 1)
+        obj = res["objects"][0]
+        self.assertEqual(obj["status"], "review")
+        self.assertEqual(obj["bbox"], [10, 10, 30, 30])
+        self.assertEqual(obj["object_id"], "org-1")
+        self.assertIn("not_target", obj["review_reasons"])
+        with self.assertRaises(ValueError):
+            model.predict(img, boxes=None)
+
+
+@unittest.skipIf(vlm is None, "нужен requests/PIL")
+class WholeFrameResultTest(unittest.TestCase):
+    def test_recall_whole_prompt_and_explicit_allow_review_empty_is_ok(self):
+        c_rec = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m",
+                         "prompt_mode": "recall"}, TAX)
+        self.assertIn("ok|bad", c_rec.prompt)
+        self.assertNotIn("ok|bad|review", c_rec.prompt)
+
+        client = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m",
+                          "prompt_mode": "recall", "allow_review": True}, TAX)
+        self.assertIn("ok|bad|review", client.prompt)
+        with mock.patch.object(client, "_ask", return_value={
+                "value": [], "error": None, "bad_json": False, "cost": 0.0, "seconds": 0.0}):
+            res = client.predict(Image.new("RGB", (100, 100)))
+        self.assertEqual(res["scope"], "mixed")
+        self.assertEqual(res["frame"]["status"], "ok")
+        self.assertFalse(res["frame"]["review"])
+
+    def test_retry_empty_retries_once_and_sums_cost_and_seconds(self):
+        c_no = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m"}, TAX)
+        c_yes = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m", "retry_empty": True}, TAX)
+        self.assertNotEqual(c_no.fingerprint(), c_yes.fingerprint())
+
+        img = Image.new("RGB", (100, 100))
+        with mock.patch.object(c_yes, "_ask", side_effect=[
+            {"value": [], "error": None, "bad_json": False, "cost": 0.01, "seconds": 1.25},
+            {"value": [{"type": "pole", "bbox": [100, 100, 200, 800], "status": "ok"}],
+             "error": None, "bad_json": False, "cost": 0.02, "seconds": 2.5},
+        ]) as ask:
+            res = c_yes.predict(img)
+        self.assertEqual(ask.call_count, 2)
+        self.assertEqual(len(res["objects"]), 1)
+        self.assertAlmostEqual(res["cost"], 0.03)
+        self.assertAlmostEqual(res["seconds"], 3.75)
+
+        # не повторяет при непустом ответе, ошибке или битом JSON
+        for first in (
+            {"value": [{"type": "pole", "bbox": [100, 100, 200, 800], "status": "ok"}],
+             "error": None, "bad_json": False, "cost": 0.01, "seconds": 1.0},
+            {"value": None, "error": "timeout", "bad_json": False, "cost": 0.0, "seconds": 1.0},
+            {"value": None, "error": None, "bad_json": True, "cost": 0.01, "seconds": 1.0},
+        ):
+            with mock.patch.object(c_yes, "_ask", return_value=first) as ask_once:
+                c_yes.predict(img)
+            self.assertEqual(ask_once.call_count, 1)
+
+    def test_whole_prompt_parse_error_is_frame_review(self):
+        client = vlm.VLM({"base_url": "http://localhost:8080/v1", "model": "m"}, TAX)
+        with mock.patch.object(client, "_ask", return_value={
+                "value": None, "error": None, "bad_json": True, "cost": 0.0, "seconds": 0.0}):
+            res = client.predict(Image.new("RGB", (100, 100)))
+        self.assertEqual(res["frame"]["status"], "review")
+        self.assertIn("bad_json", res["frame"]["review_reasons"])
 
 
 if __name__ == "__main__":

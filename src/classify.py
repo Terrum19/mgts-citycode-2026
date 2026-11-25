@@ -32,7 +32,15 @@ def is_ok(defect: str) -> bool:
     normalized = defect.lower()
     if any(w in normalized for w in NOT_OK_WORDS):
         return False
-    return any(w in normalized for w in OK_WORDS)
+    words = set("".join(ch if ch.isalnum() else " " for ch in normalized).split())
+    for word in OK_WORDS:
+        if word in ("ok", "good", "normal"):
+            # короткие английские слова — только целым токеном: иначе "broken" содержит "ok"
+            if word in words:
+                return True
+        elif word in normalized:
+            return True
+    return False
 
 
 def make_clf(C: float = 2.0):

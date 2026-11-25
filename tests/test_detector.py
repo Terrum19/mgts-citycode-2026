@@ -70,6 +70,24 @@ class BoxHelpersTest(unittest.TestCase):
         self.assertEqual(detector._box([-5, -5, 20, 20], 100, 100, 4), [0, 0, 20, 20])
         self.assertIsNone(detector._box([0, 0, 3, 30], 100, 100, 12))   # слишком узкая
         self.assertEqual(detector._box([30, 30, 20, 20], 100, 100, 4), [20, 20, 30, 30])  # порядок сторон
+        self.assertIsNone(detector._box([0, 0, 15, 35], 100, 100, 12, min_max_side=40))
+        self.assertEqual(detector._box([0, 0, 15, 45], 100, 100, 12, min_max_side=40), [0, 0, 15, 45])
+
+    def test_filter_box_per_type_and_legacy_config(self):
+        legacy_cfg = {"min_side": 12}
+        self.assertEqual(detector._filter_box([0, 0, 15, 30], 500, 500, "pole", 0.5, legacy_cfg), [0, 0, 15, 30])
+
+        cfg = {
+            "min_side": 12,
+            "min_max_side_by_type": {"pole": 80},
+            "min_score_by_type": {"pole": 0.65},
+        }
+        # мелкий или низкоуверенный pole отбрасывается
+        self.assertIsNone(detector._filter_box([0, 0, 20, 60], 500, 500, "pole", 0.9, cfg))
+        self.assertIsNone(detector._filter_box([0, 0, 20, 120], 500, 500, "pole", 0.6, cfg))
+        self.assertEqual(detector._filter_box([0, 0, 20, 120], 500, 500, "pole", 0.7, cfg), [0, 0, 20, 120])
+        # manhole не затрагивается порогом pole
+        self.assertEqual(detector._filter_box([0, 0, 40, 14], 500, 500, "manhole", 0.55, cfg), [0, 0, 40, 14])
 
     def test_dedup_keeps_best_score(self):
         found = [{"bbox": [0, 0, 100, 100], "score": 0.6, "type": "manhole", "label": "a"},

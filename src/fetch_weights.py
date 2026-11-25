@@ -15,7 +15,9 @@ from pathlib import Path
 import requests
 
 ROOT = Path(__file__).resolve().parents[1]
-SMALL = ["config.json", "preprocessor_config.json"]
+SMALL = ["config.json", "preprocessor_config.json", "processor_config.json",
+         "generation_config.json", "tokenizer.json", "tokenizer_config.json", "vocab.txt",
+         "special_tokens_map.json", "merges.txt"]
 CHUNK = 2 ** 20
 
 
@@ -65,9 +67,16 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("repo")
     ap.add_argument("--threads", type=int, default=32)
+    ap.add_argument("--snapshot", action="store_true",
+                    help="скачать полный snapshot через huggingface_hub (processor/tokenizer/shards)")
     args = ap.parse_args()
     out = ROOT / "weights" / args.repo.split("/")[-1]
     out.mkdir(parents=True, exist_ok=True)
+    if args.snapshot:
+        from huggingface_hub import snapshot_download
+        snapshot_download(args.repo, local_dir=str(out), local_dir_use_symlinks=False)
+        print(f"-> {out} (snapshot)")
+        return
     base = f"https://huggingface.co/{args.repo}/resolve/main"
     for name in SMALL:
         r = requests.get(f"{base}/{name}", timeout=60)

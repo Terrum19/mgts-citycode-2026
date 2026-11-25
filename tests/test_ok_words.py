@@ -35,7 +35,8 @@ class OkWordsTest(unittest.TestCase):
 
     def test_not_ok_words(self):
         for text in ("неисправен", "неисправность", "неудовлетворительное состояние",
-                     "не удовлетворяет требованиям", "оборваны кабели"):
+                     "не удовлетворяет требованиям", "оборваны кабели", "cover_broken",
+                     "manhole - cover_broken", "broken"):
             with self.subTest(text=text):
                 self.assertFalse(self.is_ok(text))
 

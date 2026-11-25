@@ -18,7 +18,9 @@
 ## Документы
 
 - [docs/case.md](docs/case.md) — постановка кейса и всё, что сказали на вебинаре (включая ответы на вопросы)
-- [docs/plan.md](docs/plan.md) — **финальный план**: валидационный стенд, три варианта, метрики, график
+- [docs/plan.md](docs/plan.md) — первоначальный финальный план
+- [docs/implementation_plan.md](docs/implementation_plan.md) — **исправленный план**: аудит слабых мест, контракты, блокировки
+- [docs/implementation_report.md](docs/implementation_report.md) — что фактически запущено и что заблокировано
 - [docs/speed.md](docs/speed.md) — скорость связки на M4/CPU и сколько времени займёт финал
 - [docs/models.md](docs/models.md) — справка по моделям: детекторы, VLM, OpenRouter
 - [docs/essay.md](docs/essay.md) — квалификационное эссе
@@ -35,6 +37,7 @@ echo "OPENROUTER_API_KEY=..." >> .env
 | Что | Команда |
 |---|---|
 | **Финал: папки train → выбор связки → предсказания test** | `python src/final.py data/final_train data/final_test --out out/final` |
+| Финальный отбор с локальной VLM | `python src/final.py TRAIN TEST --qwen-variant qwen8b_local --out out/final` |
 | Система: фото → перечень на ремонт | `python src/predict.py --variant qwen235 --images photos/ [--meta photos.csv] --out out/run1` |
 | Интерфейс для защиты | `streamlit run src/app.py` |
 | Сравнение вариантов на разметке | `python src/run.py --variant qwen235 det_qwen235 --data pano_dev damage_manholes` |
@@ -43,15 +46,25 @@ echo "OPENROUTER_API_KEY=..." >> .env
 ### Режимы финала
 
 Для локальных вариантов установите также `requirements-detector.txt`. Заранее положите
-`dinov2-base` в `weights/` (`python src/fetch_weights.py facebook/dinov2-base`) и скачайте Mask2Former
-из `[detector].model` в локальный кэш Transformers. На месте проверьте с `HF_HUB_OFFLINE=1`.
+`dinov2-base` в `weights/` (`python src/fetch_weights.py facebook/dinov2-base`) и скачайте полный
+snapshot детектора: `python src/fetch_weights.py facebook/mask2former-swin-large-mapillary-vistas-panoptic --snapshot`.
+Затем укажите локальную папку в `[detector].model`. На месте проверьте `preflight --offline`;
+отсутствие весов — ошибка, а не повод скачивать модель во время демонстрации.
 
 | Формат задания | Запуск |
 |---|---|
 | Один класс на фото | `python src/final.py TRAIN TEST --no-qwen --out out/final`, затем `photo_dino` в интерфейсе для новых фото |
-| Объекты с готовыми рамками | `python src/predict.py --variant boxes_dino --images PHOTO_DIR --boxes boxes.json --meta photos.xlsx --out out/boxes` |
+| Объекты с готовыми рамками, есть совместимый checkpoint | `python src/predict.py --variant boxes_dino --images PHOTO_DIR --boxes boxes.json --meta photos.xlsx --out out/boxes` |
+| Объекты с готовыми рамками, checkpoint нет | `python src/predict.py --variant boxes_vlm --images PHOTO_DIR --boxes boxes.json --meta photos.xlsx --out out/boxes` |
 | Рамки нужно найти локально | `python src/predict.py --variant det_dino --images PHOTO_DIR --meta photos.xlsx --out out/det` |
 | Рамки нужно найти, API доступен | `python src/predict.py --variant qwen235 --images PHOTO_DIR --meta photos.xlsx --out out/qwen` |
+| Offline без сети | `python src/preflight.py --variant det_dino_offline --offline`, затем `predict.py --variant det_dino_offline` (только после локальных весов) |
+
+`final.py` создаёт `out/photo_dino_variant.toml` — секцию `[variants.photo_dino]`, синхронизированную
+с выбранной policy checkpoint. Если конфиг расходится с checkpoint, `PhotoDino` падает явно; это
+защита от молчаливого запуска другой связки. Если ни один candidate не прошёл ограничения,
+`final.py` пишет `report.json` с `status=selection_failed`, не создаёт checkpoint/predictions и
+возвращает exit code 2.
 
 `boxes.json` — массив записей `{"file":"foto.jpg","objects":[{"bbox":[10,20,130,180],"type":"manhole","object_id":"42"}]}`.
 Координаты в пикселях, `[x1,y1,x2,y2]`. Пустой кадр задаётся через `"objects":[]`.
@@ -72,6 +85,11 @@ python src/poc/compare_crops.py pano_dev runs/pano_dev__det_dino/preds.json
 и `damage` для каждого объекта. При нехватке примеров состояния или низкой уверенности
 найденный объект попадает в `review.csv`. `repair.csv` содержит подтверждённые заявки.
 В отчёте оценки `repair_recall` учитывает и пропущенные рамки. Сначала подбирайте параметры на dev.
+
+`repair.csv` — только подтверждённые `bad`. `review.csv` — только `review`. `triage.csv` — обязательная
+очередь `bad + review` (оба scope), её и стоит отдавать на проверку/выезд. `frames.csv` содержит
+кадровый результат, включая Quality Gate и PhotoDino без фиктивного объекта с `bbox=None`.
+`review` — это не «отброшенный результат», а обязательная ручная проверка.
 
 ### Каскад, погодные аугментации и бэкенды
 
@@ -100,18 +118,45 @@ python src/poc/compare_crops.py pano_dev runs/pano_dev__det_dino/preds.json
 Всё настраивается в [config.toml](config.toml): `[taxonomy]` — типы объектов и виды повреждений (на финале
 меняем только его и `[names]`), `[variants.*]` — модели, `[datasets.*]` — наборы для оценки, `[detector]` — вариант 1.
 
+### Offline и preflight
+
+```bash
+python3 src/preflight.py --variant det_dino_offline --offline
+python3 src/preflight.py --variant photo_dino --load
+```
+
+`*_offline` не имеет права ходить в сеть: HF id, удалённая VLM и отсутствие локальных весов — явная
+ошибка. `*_local` использует `qwen8b_local` на localhost. Проверка без `--load` не является
+доказательством offline-инференса.
+
 ### Проверки без тяжёлых зависимостей
 
 ```bash
 python3 -m unittest discover -s tests
+python3 -m py_compile src/*.py src/poc/*.py src/collect/*.py src/label/*.py
+python3 src/audit_data.py --labels data/labels.json --images data/raw/panoramas
 ```
 
-Тесты работают на stdlib + PIL/numpy: логика каскада и порогов, погодные аугментации, разбор
-конфига, геометрия рамок детектора, copy-paste. Пути, которым нужны torch/sklearn/requests
-(обучение, чекпойнты, VLM, Streamlit), проверяются только `python3 -m py_compile`.
+210 stdlib-тестов покрывают контракт результата, frame/object-метрики, triage/cost, policy,
+отбор, taxonomy, VLM cache, CSV и аудит. Аудит текущей разметки проходит с предупреждениями
+(в частности, несовпадение width/height и `bad_frame` с объектом). `pano_test` уже использован
+прогонами qwen235/gemma26 и помечен contaminated; чистый holdout — только из новых данных.
+
+Тесты работают на stdlib + PIL/numpy: контракт результата, каскад/пороги, frame/object-метрики,
+triage/cost, policy, отбор, taxonomy, VLM cache, CSV, аудит, погодные аугментации, геометрия рамок.
+Пути, которым нужны torch/sklearn/requests (обучение, чекпойнты, реальный VLM/детектор, Streamlit),
+проверяются отдельным `.venv/bin/python` smoke; синтетический smoke не является метрикой качества.
 
 | Файл | Что делает |
 |---|---|
+| `src/results.py` | контракт frame/object/mixed, review reasons, bbox sanitation |
+| `src/policy.py` | общая decision policy для validation/test/PhotoDino/CropDino |
+| `src/selection.py` | image-level отбор связки по operational cost |
+| `src/export_rows.py` | objects/frames/repair/review/triage CSV |
+| `src/taxonomy.py` | canonical taxonomy fingerprint и версия checkpoint |
+| `src/vlm_cache.py` | кэш VLM по JPEG/prompt/variant, атомарная запись |
+| `src/preflight.py`, `src/audit_data.py` | проверка весов/offline и аудит данных |
+| `src/quality.py` | Quality Gate (по умолчанию выключен) |
 | `src/vlm.py` | клиент OpenAI-совместимого API, промпты, разбор ответа |
 | `src/detector.py` | детектор объектов: бэкенды Mask2Former / Grounding DINO / RT-DETR → рамки |
 | `src/cascade.py` | каскад: суммарные P(ok)/P(bad) внутри типа, margin между статусами, `review`, слияние с VLM |

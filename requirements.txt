@@ -3,3 +3,6 @@ pillow
 streamlit
 pandas
 openpyxl
+joblib
+numpy
+scikit-learn

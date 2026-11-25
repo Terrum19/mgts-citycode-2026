@@ -21,8 +21,10 @@ Test может быть плоской папкой с фото или папк
 import argparse
 import copy
 import json
+import os
 import sys
 import time
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -35,10 +37,18 @@ from sklearn.metrics import accuracy_score, f1_score
 from sklearn.model_selection import StratifiedGroupKFold
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from atomic import write_json_atomic  # noqa: E402
 from augment import augment, sample_seed  # noqa: E402
 from classify import groups_of, is_ok  # noqa: E402
+from config_utils import resolve_variant  # noqa: E402
 from embed import IMAGENET, ROOT  # noqa: E402
 from folders import IMG_EXT, TABLE_EXT, load, match_table, read_table, split_label  # noqa: E402
+from policy import finalize, initial, semantic_policy  # noqa: E402
+from selection import baselines as selection_baselines  # noqa: E402
+from selection import frame_metrics, select_candidate  # noqa: E402
+from taxonomy import (FORMAT_VERSION, hash_files, package_versions,  # noqa: E402
+                      taxonomy_fingerprint)
+from vlm_cache import Qwen  # noqa: E402
 
 T0 = time.time()
 
@@ -91,10 +101,14 @@ def layer_out(layer, h):
 
 
 class Encoder:
-    def __init__(self, dev, size, k):
+    def __init__(self, dev, size, k, offline: bool = False):
         from transformers import AutoModel
         local = ROOT / "weights/dinov2-base"
-        self.model = AutoModel.from_pretrained(str(local) if local.exists() else "facebook/dinov2-base").eval().to(dev)
+        if offline and not local.exists():
+            raise FileNotFoundError(f"offline: нет локальных весов DINOv2 в {local}")
+        source = str(local) if local.exists() else "facebook/dinov2-base"
+        local_only = bool(offline or os.environ.get("HF_HUB_OFFLINE"))
+        self.model = AutoModel.from_pretrained(source, local_files_only=local_only).eval().to(dev)
         self.dev, self.size = dev, size
         self.cut = len(self.model.encoder.layer) - k
         self.mean, self.std = np.array(IMAGENET[0], np.float32), np.array(IMAGENET[1], np.float32)
@@ -215,48 +229,100 @@ def lr_probs(clf, F, n_cls):
     return P
 
 
-# ---------- Qwen: отвечает в фоне, кэш на диске ----------
 
-class Qwen:
-    def __init__(self, labels, cache: Path):
-        from run import load_config
-        from vlm import VLM
-        cfg = load_config()
-        self.vlm = VLM(cfg["variants"]["qwen235"], cfg["taxonomy"])
-        self.labels, self.cache_path = labels, cache
-        self.cache = json.loads(cache.read_text()) if cache.exists() else {}
-        self.pool = ThreadPoolExecutor(cfg["variants"]["qwen235"].get("workers", 4))
-        self.fut = {}
+# ---------- общая policy для validation/test/PhotoDino ----------
 
-    def submit(self, paths):
-        from vlm_classify import classify
+def triples_of(classes, ok_of):
+    out = []
+    for label in classes:
+        typ, defect = split_label(label, None)
+        out.append([typ, "ok" if ok_of.get(label, False) else "bad", defect or None])
+    return out
 
-        def one(p):
-            try:
-                r = classify(self.vlm, Image.open(p), self.labels)
-            except Exception as e:  # noqa: BLE001 — один сбой не должен ронять финал
-                r = {"label": None, "description": "", "error": str(e)[:200]}
-            return {"label": r.get("label"), "description": r.get("description", ""), "error": r.get("error")}
-        for p in map(str, paths):
-            if p not in self.cache and p not in self.fut:
-                self.fut[p] = self.pool.submit(one, p)
 
-    def get(self, paths):
-        out = []
-        for p in map(str, paths):
-            if p not in self.cache:
-                self.cache[p] = self.fut.pop(p).result()
-            out.append(self.cache[p])
-        self.cache_path.write_text(json.dumps(self.cache, ensure_ascii=False, indent=1))
-        return out
+def answer_norm(answer, available=True):
+    answer = answer or {}
+    return {"available": bool(available), "label": answer.get("label"), "answer": None,
+            "description": str(answer.get("description") or ""), "error": answer.get("error"),
+            "bad_json": bool(answer.get("bad_json")), "review": bool(answer.get("review"))}
 
-    def onehot(self, answers, classes):
-        Q = np.zeros((len(answers), len(classes)))
-        for i, a in enumerate(answers):
-            if a["label"] in classes:
-                Q[i, classes.index(a["label"])] = 1
-        return Q
 
+def decide_matrix(P, classes, triples, answers, Q, *, cascade, w, cfg, support, tax):
+    """Прогнать production policy по матрице вероятностей. Возвращает решения по кадрам."""
+    from collections import Counter
+    out = []
+    n = len(P)
+    for i in range(n):
+        scores = [float(x) for x in P[i]]
+        ans = answers[i] if answers is not None else None
+        if cascade:
+            dec = initial(classes, triples, scores, mode="cascade", cfg={**cfg, "qwen_weight": 0.0},
+                          support=support, type_hint=None, class_policy="joint")
+            vlm = answer_norm(ans) if ans is not None and dec.get("needs_vlm") else None
+        else:
+            dec = initial(classes, triples, scores, mode="legacy",
+                          cfg={**cfg, "qwen_weight": w, "min_confidence": 0.0},
+                          support=None, type_hint=None, class_policy="joint")
+            vlm = answer_norm(ans) if ans is not None and w > 0 else None
+        merged = finalize(dec, cfg={**cfg, "qwen_weight": 0.0 if cascade else w}, tax=tax, vlm=vlm)
+        if merged is None:  # целый кадр не выбрасываем: это не находка с чужой рамкой
+            merged = {"status": "review", "type": None, "damage": None, "label": None,
+                      "description": "", "review_reasons": ["not_target"], "review": True}
+        merged["review"] = merged.get("status") == "review" or bool(merged.get("review"))
+        out.append(merged)
+    return out
+
+
+def _status_bad_metrics(y_bad, decisions):
+    tp = sum(1 for gt, d in zip(y_bad, decisions) if gt and d.get("status") == "bad")
+    fp = sum(1 for gt, d in zip(y_bad, decisions) if not gt and d.get("status") == "bad")
+    fn = sum(1 for gt, d in zip(y_bad, decisions) if gt and d.get("status") != "bad")
+    return tp, fp, fn
+
+
+def add_candidate(rows, y_bad, P, classes, triples, answers, Q, *, name, base, cascade, w,
+                  cfg, support, tax, cost):
+    decisions = decide_matrix(P, classes, triples, answers, Q, cascade=cascade, w=w,
+                              cfg=cfg, support=support, tax=tax)
+    metrics = frame_metrics(y_bad, decisions, cost)
+    tp, fp, fn = _status_bad_metrics(y_bad, decisions)
+    top = P.argmax(1)
+    macro = f1_score(y_bad, [d.get("status") == "bad" for d in decisions], average="binary", zero_division=0)
+    rows.append({
+        "name": name, "base": base, "cascade": bool(cascade), "w": float(w),
+        "uses_vlm": bool(answers is not None and (w > 0 or cascade)),
+        "serializable": True,
+        "macro_f1": float(macro),
+        "defect_precision": tp / (tp + fp) if tp + fp else 0.0,
+        "defect_recall": tp / (tp + fn) if tp + fn else 0.0,
+        **metrics,
+        "decisions": decisions,
+    })
+
+
+def vlm_only_candidate(rows, y_bad, answers, classes, triples, cost):
+    decisions = []
+    answers = list(answers) if answers else [{"label": None, "error": "нет VLM"}] * len(y_bad)
+    for answer in answers:
+        label = answer.get("label")
+        if label in classes and not answer.get("review"):
+            index = classes.index(label)
+            status, typ, damage = triples[index][1], triples[index][0], triples[index][2]
+            decisions.append({"status": status, "type": typ, "damage": damage, "label": label,
+                              "review": status == "review", "review_reasons": [],
+                              "description": str(answer.get("description") or "")})
+        else:
+            reason = "vlm_error" if answer.get("error") or answer.get("bad_json") else "low_confidence"
+            decisions.append({"status": "review", "type": None, "damage": None, "label": None,
+                              "review": True, "review_reasons": [reason],
+                              "description": str(answer.get("description") or "")})
+    metrics = frame_metrics(y_bad, decisions, cost)
+    tp, fp, fn = _status_bad_metrics(y_bad, decisions)
+    rows.append({"name": "только Qwen", "base": "vlm", "cascade": False, "w": 1.0,
+                 "uses_vlm": True, "serializable": False, "macro_f1": None,
+                 "defect_precision": tp / (tp + fp) if tp + fp else 0.0,
+                 "defect_recall": tp / (tp + fn) if tp + fn else 0.0,
+                 **metrics, "decisions": decisions})
 
 def main():
     ap = argparse.ArgumentParser()
@@ -274,9 +340,20 @@ def main():
     ap.add_argument("--augment-seed", type=int, default=42)
     ap.add_argument("--val", type=float, default=0.2, help="доля train для выбора связки")
     ap.add_argument("--no-qwen", action="store_true")
+    ap.add_argument("--qwen-variant", default=None, help="вариант VLM из config.toml; по умолчанию qwen235")
     ap.add_argument("--test-format", choices=["auto", "images", "labeled"], default="auto")
     args = ap.parse_args()
+    if args.no_qwen and args.qwen_variant:
+        ap.error("--no-qwen и --qwen-variant взаимоисключающи")
+    args.qwen_variant = args.qwen_variant or "qwen235"
 
+    from run import load_config
+    cfg = load_config()
+    try:
+        vcfg = resolve_variant(cfg, "photo_dino")
+    except ValueError:
+        vcfg = dict(cfg["variants"]["photo_dino"])
+    offline = bool(vcfg.get("offline"))
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     tr_root, te_root = Path(args.train), Path(args.test)
@@ -288,6 +365,8 @@ def main():
     n_cls = len(classes)
     y = np.array([classes.index(x["label"]) for x in tr])
     ok_of = {x["label"]: is_ok(x["defect"]) for x in tr + (te if te_labeled else [])}
+    triples = triples_of(classes, ok_of)
+    C = np.array(classes, dtype=object)
     tr_paths = [tr_root / x["file"] for x in tr]
     te_paths = [te_root / x["file"] for x in te]
     _, va = next(StratifiedGroupKFold(round(1 / args.val), shuffle=True, random_state=0)
@@ -299,14 +378,25 @@ def main():
     times = {}
 
     qwen = None
+    answers_va = answers_te = None
+    Q_va = Q_te = None
     if not args.no_qwen:
-        qwen = Qwen(classes, out / "qwen.json")
+        from config_utils import check_offline_vlm
+        if offline:
+            check_offline_vlm(cfg, {"qwen": args.qwen_variant}, True)
+        try:
+            qcfg = resolve_variant(cfg, args.qwen_variant)
+        except ValueError as exc:
+            ap.error(f"нет варианта VLM {args.qwen_variant!r}: {exc}")
+        qwen = Qwen(classes, out / "qwen.json", variant=args.qwen_variant, vcfg=qcfg, tax=cfg["taxonomy"])
+        if not qwen.ready:
+            ap.error(f"для {args.qwen_variant} нет ключа; запустите с --no-qwen или настройте key_env")
         qwen.submit([tr_paths[i] for i in va] + te_paths)  # сначала 20% — они нужны раньше
-        log("Qwen запущен в фоне")
+        log(f"Qwen ({args.qwen_variant}) запущен в фоне")
 
     # 1. Один проход по train: токены (обычные и отражённые) + признаки
     t = time.time()
-    enc = Encoder(dev, args.size, args.k)
+    enc = Encoder(dev, args.size, args.k, offline=offline)
     H, Hf, F = [], [], []
     for imgs in enc.batches(tr_paths, what="train"):
         h = enc.frozen(imgs)
@@ -323,8 +413,8 @@ def main():
     aug_cfg, Fa_fit, ya_fit = {}, None, None
     F_ext, y_ext, fit_ext = F, y, fit
     if args.augment:
-        from run import load_config
-        aug_cfg = load_config().get("augment", {})
+        from run import load_config as _load_config
+        aug_cfg = _load_config().get("augment", {})
         t = time.time()
         Fa_fit, ya_fit = augmented_features(enc, tr_paths, y, fit, args.augment, aug_cfg, args.augment_seed)
         F_ext = np.concatenate([F, Fa_fit])
@@ -333,39 +423,84 @@ def main():
         times["признаки аугментаций"] = time.time() - t
         log(f"погодные признаки: +{len(Fa_fit)} векторов ({times['признаки аугментаций'] / 60:.1f} мин)")
 
-    # 2. Выбор связки на 20%
+    # 2. Выбор связки на 20% через ту же policy, что будет в production
     t = time.time()
     clf, _ = logreg(F_ext, y_ext, fit_ext, n_cls, args.C)
-    P_lr = lr_probs(clf, F[va], n_cls)  # валидация — только оригиналы: копии не должны её завышать
+    P_lr = lr_probs(clf, F[va], n_cls)
     net = train_tail(enc, H, Hf, y, fit, n_cls, args.epochs, args.lr)
     P_ft = np.concatenate([tail_probs(net, H[va[s:s + 64]].to(dev)) for s in range(0, len(va), 64)])
     del net
     times["обучение на 80%"] = time.time() - t
-    bases = {"логрег": P_lr, "дообучение": P_ft, "логрег+дообучение": (P_lr + P_ft) / 2}
-    Q_va = None
+    bases = {"logreg": P_lr, "дообучение": P_ft, "логрег+дообучение": (P_lr + P_ft) / 2}
     if qwen:
         log("жду ответы Qwen на 20%")
-        Q_va = qwen.onehot(qwen.get([tr_paths[i] for i in va]), classes)
-    C = np.array(classes, dtype=object)
+        answers_va = qwen.get([tr_paths[i] for i in va])
+        Q_va = np.asarray(qwen.onehot(answers_va, classes), dtype=float)
+
+    from collections import Counter
+    support_fit = dict(Counter(classes[int(y[i])] for i in fit))
+    cost_cfg = cfg.get("cost") or {}
+    selection_cfg = cfg.get("selection") or {}
+    y_bad_va = [not ok_of[str(C[i])] for i in y[va]]
     rows = []
-    for name, P in bases.items():
-        for w in ([0, 0.3, 0.5, 1.0] if Q_va is not None else [0]):
-            pred = C[(P + w * Q_va).argmax(1)] if w else C[P.argmax(1)]
-            rows.append({"связка": name + (f" + Qwen×{w}" if w else ""), "base": name, "w": w,
-                         **score(C[y[va]], pred, ok_of)})
-    if Q_va is not None:
-        rows.append({"связка": "только Qwen", "base": None, "w": 1.0,
-                     **score(C[y[va]], C[Q_va.argmax(1)], ok_of)})
-    best = max((r for r in rows if r["base"]), key=lambda r: r["macro_f1"])  # при равенстве — первая, т.е. проще
-    print(f"\nСвязки на {len(va)} отложенных фото (это и есть наша оценка качества):")
-    for r in sorted(rows, key=lambda r: -r["macro_f1"]):
-        print(f"  {'→' if r is best else ' '} {r['связка']:30} {fmt(r)}")
-    log(f"выбрана: {best['связка']}")
+    base_names = {"logreg": "логрег", "дообучение": "дообучение", "логрег+дообучение": "логрег+дообучение"}
+    for base, P in bases.items():
+        weights = [0.0, 0.3, 0.5, 1.0] if qwen else [0.0]
+        for w in weights:
+            add_candidate(rows, y_bad_va, P, classes, triples, answers_va, Q_va,
+                          name=base_names[base] + (f" + Qwen×{w}" if w else ""),
+                          base=base, cascade=False, w=w, cfg={**vcfg, "min_confidence": 0.0,
+                                                            "hint_mode": "none"}, support=None,
+                          tax=cfg["taxonomy"], cost=cost_cfg)
+        add_candidate(rows, y_bad_va, P, classes, triples, answers_va, Q_va,
+                      name=base_names[base] + " каскад" + (" + Qwen" if qwen else ""),
+                      base=base, cascade=True, w=0.0,
+                      cfg={**vcfg, "min_support": int(vcfg.get("min_support", 2)), "hint_mode": "none"},
+                      support=support_fit, tax=cfg["taxonomy"], cost=cost_cfg)
+    if qwen:
+        vlm_only_candidate(rows, y_bad_va, answers_va, classes, triples, cost_cfg)
+
+    baseline_rows = selection_baselines(y_bad_va, cost_cfg)
+    selection = select_candidate(rows, selection_cfg, baseline_rows)
+    print(f"\nСвязки на {len(va)} отложенных фото (кандидаты, ограничения, cost):")
+    for row in sorted(rows, key=lambda r: (r.get("operational_cost") is None,
+                                           r.get("operational_cost") or 0.0,
+                                           -(r.get("triage_recall") or 0.0))):
+        chosen = selection.get("chosen") or {}
+        mark = "→" if chosen.get("name") == row.get("name") else " "
+        reason = "; ".join(row.get("reject_reasons") or [])
+        print(f"  {mark} {row['name']:30} cost {row.get('operational_cost')} "
+              f"triage R {row.get('triage_recall')} review {row.get('review_rate')} "
+              f"support {row.get('support_bad')}/{row.get('support_ok')}" + (f"  [{reason}]" if reason else ""))
+
+    def base_report(status):
+        return {"status": status, "train": len(tr), "test": len(te), "classes": classes,
+                "fit": len(fit), "validation": len(va),
+                "split": f"StratifiedGroupKFold({round(1 / args.val)}) по groups_of",
+                "taxonomy": cfg["taxonomy"],
+                "taxonomy_sha256": taxonomy_fingerprint(cfg["taxonomy"]),
+                "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "package_versions": package_versions(), "qwen_variant": args.qwen_variant if qwen else "",
+                "selection": selection, "val_table": rows, "minutes": {k: round(v / 60, 1) for k, v in times.items()},
+                "args": vars(args)}
+
+    if selection["status"] != "ok":
+        report = base_report("selection_failed")
+        report["data_hashes"] = {}
+        write_json_atomic(out / "report.json", report)
+        log(f"ОТБОР НЕ ВЫПОЛНЕН: {selection.get('reason')}. Checkpoint и predictions не созданы; "
+            f"таблица кандидатов в {out}/report.json")
+        sys.exit(2)
+
+    best = selection["chosen"]
+    log(f"выбрана: {best['name']} (cost {best.get('operational_cost')}, triage R {best.get('triage_recall')}, "
+        f"review {best.get('review_rate')})")
 
     # 3. Переобучение выбранного на всём train
     t = time.time()
     everything = np.arange(len(y))
-    use_lr, use_ft = best["base"] in ("логрег", "логрег+дообучение"), best["base"] in ("дообучение", "логрег+дообучение")
+    use_lr = best["base"] in ("logreg", "логрег+дообучение")
+    use_ft = best["base"] in ("дообучение", "логрег+дообучение")
     clf = None
     if use_lr:
         if args.augment:  # теперь val законно входит в 100% train: досчитываем копии и для него
@@ -377,12 +512,32 @@ def main():
         clf = logreg(F_all, y_all, np.arange(len(F_all)), n_cls, args.C)[0]
     net = train_tail(enc, H, Hf, y, everything, n_cls, args.epochs, args.lr) if use_ft else None
     import joblib
-    # CPU tensors keep the checkpoint portable between CPU and MPS.
+    policy_cfg = {**vcfg, "cascade": bool(best["cascade"]),
+                  "qwen_weight": 0.0 if best["cascade"] else float(best["w"]),
+                  "hint_mode": "none", "mode": "cascade" if best["cascade"] else "legacy",
+                  "min_confidence": 0.0 if not best["cascade"] else float(vcfg.get("min_confidence", 0.0))}
+    chosen_policy = semantic_policy(policy_cfg)
+    train_files = list(tr_paths) + sorted(p for p in tr_root.rglob("*")
+                                         if p.is_file() and p.suffix.lower() in TABLE_EXT)
+    data_hashes = {"train": hash_files(train_files, [tr_root])}
     state = {
+        "format_version": FORMAT_VERSION,
+        "created_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "taxonomy": cfg["taxonomy"],
+        "taxonomy_sha256": taxonomy_fingerprint(cfg["taxonomy"]),
         "size": args.size, "k": args.k, "classes": classes,
         "ok": {c: ok_of[c] for c in classes}, "logreg": clf,
         "tail": {key: value.cpu() for key, value in net.state_dict().items()} if net is not None else None,
-        "qwen_weight": best["w"],
+        "qwen_weight": 0.0 if best["cascade"] else float(best["w"]),
+        "qwen_variant": args.qwen_variant if qwen else "",
+        "policy": chosen_policy,
+        "selection_config": selection_cfg,
+        "selection": {"chosen": best["name"], "constraints": selection["constraints"],
+                      "support_bad": selection["support_bad"], "support_ok": selection["support_ok"]},
+        "data_hashes": data_hashes,
+        "package_versions": package_versions(),
+        "training_args": {**vars(args), "support_fit": support_fit, "support_full":
+                          dict(Counter(classes[int(y[i])] for i in y))},
     }
     joblib.dump(state, out / "photo_dino.joblib.tmp")
     (out / "photo_dino.joblib.tmp").replace(out / "photo_dino.joblib")
@@ -390,7 +545,7 @@ def main():
     times["обучение на 100%"] = time.time() - t
     log("переобучено на всём train")
 
-    # 4. Test: один проход, обе модели сразу
+    # 4. Test: тот же initial/finalize, что validation и PhotoDino
     t = time.time()
     Ps = []
     for imgs in enc.batches(te_paths, what="test"):
@@ -398,36 +553,71 @@ def main():
         parts = ([lr_probs(clf, enc.feats(h), n_cls)] if use_lr else []) + ([tail_probs(net, h)] if use_ft else [])
         Ps.append(sum(parts) / len(parts))
     P = np.concatenate(Ps)
-    answers = qwen.get(te_paths) if qwen else [{"label": None, "description": ""}] * len(te)
-    if best["w"]:
-        P = P + best["w"] * qwen.onehot(answers, classes)
-    P = P / P.sum(1, keepdims=True)
+    answers_te = qwen.get(te_paths) if qwen else [{"label": None, "description": ""} for _ in te]
+    Q_te = np.asarray(qwen.onehot(answers_te, classes), dtype=float) if qwen else None
+    support_full = dict(Counter(classes[int(y[i])] for i in y))
+    decisions = decide_matrix(P, classes, triples, answers_te, Q_te, cascade=bool(best["cascade"]),
+                              w=float(best["w"]), cfg={**vcfg, "min_confidence": 0.0, "hint_mode": "none"},
+                              support=support_full, tax=cfg["taxonomy"])
     times["test"] = time.time() - t
-    pred = C[P.argmax(1)]
     bad = np.array([not ok_of[c] for c in classes])
     p_bad = P[:, bad].sum(1)
-
     rows_out = []
     for i, x in enumerate(te):
-        typ, defect = split_label(pred[i], None)
+        d = decisions[i]
+        status = d.get("status", "review")
+        typ, defect = d.get("type"), d.get("damage")
         top = np.argsort(-P[i])[:3]
-        rows_out.append({"Имя файла": x["file"], "Класс": pred[i], "Тип": typ, "Дефект": defect,
-                         "Неисправен": bool(not ok_of[pred[i]]), "P(дефект)": round(float(p_bad[i]), 3),
-                         "Уверенность": round(float(P[i].max()), 3),
-                         "Топ-3": "; ".join(f"{classes[j]} {P[i, j]:.2f}" for j in top),
-                         "Qwen: класс": answers[i]["label"], "Описание (Qwen)": answers[i]["description"],
-                         **({"Истинный класс": x["label"]} if te_labeled else {}), **x.get("extra", {})})
+        rows_out.append({
+            "Имя файла": x["file"],
+            "Класс": d.get("label") if status in ("ok", "bad") else "",
+            "Тип": typ or "", "Дефект": defect or "",
+            "Статус": status, "Неисправен": status == "bad",
+            "Требует проверки": status == "review",
+            "Причины review": ";".join(d.get("review_reasons") or []),
+            "P(дефект)": round(float(p_bad[i]), 3),
+            "Уверенность": round(float(P[i].max()), 3),
+            "Топ-3": "; ".join(f"{classes[j]} {P[i, j]:.2f}" for j in top),
+            "Qwen: класс": answers_te[i].get("label"),
+            "Описание (Qwen)": answers_te[i].get("description", ""),
+            **({"Истинный класс": x["label"]} if te_labeled else {}), **x.get("extra", {}),
+        })
     df = pd.DataFrame(rows_out)
-    df.to_excel(out / "predictions.xlsx", index=False)
+    try:
+        df.to_excel(out / "predictions.xlsx", index=False)
+    except Exception as exc:  # noqa: BLE001 — openpyxl может отсутствовать; CSV остаётся
+        log(f"predictions.xlsx не записан ({str(exc)[:120]}); есть predictions.csv")
     df.to_csv(out / "predictions.csv", index=False)
-    report = {"train": len(tr), "test": len(te), "classes": classes, "device": dev, "chosen": best["связка"],
-              "val_table": rows, "minutes": {k: round(v / 60, 1) for k, v in times.items()},
-              "args": vars(args)}
+    snippet = f"""[variants.photo_dino]
+kind = "photo_dino"
+checkpoint = "{out / 'photo_dino.joblib'}"
+qwen = "{args.qwen_variant if qwen else ''}"
+cascade = {str(bool(best["cascade"])).lower()}
+hint_mode = "none"
+p_bad_min = {chosen_policy.get("p_bad_min")}
+p_bad_max_ok = {chosen_policy.get("p_bad_max_ok")}
+status_conf_min = {chosen_policy.get("status_conf_min")}
+margin_min = {chosen_policy.get("margin_min")}
+describe_bad = {str(bool(chosen_policy.get("describe_bad"))).lower()}
+not_target = "{chosen_policy.get("not_target", "review")}"
+min_support = {chosen_policy.get("min_support", 2)}
+"""
+    (out / "photo_dino_variant.toml").write_text(snippet, encoding="utf-8")
+    report = base_report("ok")
+    report.update({
+        "chosen": best["name"], "chosen_policy": chosen_policy,
+        "chosen_variant_snippet": snippet, "data_hashes": data_hashes,
+    })
     if te_labeled:
-        report["test_metrics"] = score(np.array([x["label"] for x in te], dtype=object), pred, ok_of)
-        print(f"\nнастоящие метрики на test ({best['связка']}): {fmt(report['test_metrics'])}")
-    (out / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=1, default=float))
-    print(f"\nнеисправных в test: {int(df['Неисправен'].sum())} из {len(df)}")
+        y_te = np.array([classes.index(x["label"]) for x in te])
+        y_bad_te = [not ok_of[str(C[i])] for i in y_te]
+        report["test_metrics"] = frame_metrics(y_bad_te, decisions, cost_cfg)
+        report["classification_reference"] = score(C[y_te], C[P.argmax(1)], ok_of)
+    write_json_atomic(out / "report.json", report)
+    if qwen:
+        qwen.close()
+    print(f"\nнеисправных в test: {int(df['Неисправен'].sum())} из {len(df)}; "
+          f"review: {int(df['Требует проверки'].sum())}; ok: {int((df['Статус'] == 'ok').sum())}")
     log(f"готово -> {out}/predictions.xlsx; время по этапам, мин: {report['minutes']}")
 
 

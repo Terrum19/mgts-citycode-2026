@@ -5,3 +5,5 @@ torchvision
 transformers
 scipy
 scikit-learn
+timm
+huggingface_hub

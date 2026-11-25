@@ -21,12 +21,19 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import variants  # noqa: E402
 from draw import annotate  # noqa: E402
+from atomic import write_json_atomic  # noqa: E402
 from evaluate import evaluate, load_labels  # noqa: E402
+from results import get_objects  # noqa: E402
 from vlm import ROOT  # noqa: E402
 
-ROWS = ["repair_tp", "repair_fp", "repair_fn", "repair_precision", "repair_recall", "review_objects", "images", "gt_objects", "gt_bad_objects", "det_precision", "det_recall", "det_precision@0.3",
-        "det_recall@0.3", "det_recall_anytype", "img_bad_recall", "img_bad_precision", "obj_bad_recall",
-        "obj_bad_precision", "damage_acc", "bad_json_rate", "error_rate", "sec_per_image", "cost_usd"]
+ROWS = ["repair_tp", "repair_fp", "repair_fn", "repair_precision", "repair_recall", "repair_f2",
+        "triage_tp", "triage_fp", "triage_fn", "triage_precision", "triage_recall", "triage_f2",
+        "missed_bad_after_triage", "review_objects", "review_rate", "review_frames",
+        "frame_bad_recall", "frame_triage_recall", "operational_cost", "triage_cost",
+        "images", "gt_objects", "gt_bad_objects", "det_precision", "det_recall", "det_precision@0.3",
+        "det_recall@0.3", "det_recall_anytype", "img_bad_recall", "img_bad_precision", "img_bad_f2",
+        "obj_bad_recall", "obj_bad_precision", "obj_bad_f2", "damage_acc", "bad_json_rate",
+        "error_rate", "sec_per_image", "cost_usd"]
 
 
 def load_config() -> dict:
@@ -43,7 +50,8 @@ def run_one(vname: str, dname: str, cfg: dict, review: int) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     cache_path = out / "preds.json"
     cache = json.loads(cache_path.read_text()) if cache_path.exists() else {}
-    preds = {f: p for f, p in cache.items() if p.get("fingerprint") == fp and not p.get("error")}
+    preds = {f: p for f, p in cache.items()
+             if p.get("fingerprint") == fp and not p.get("error") and not p.get("bad_json")}
     todo = [lab for lab in labels if lab["file"] not in preds]
     print(f"[{dname} / {vname}] {len(labels)} кадров, из кэша {len(labels) - len(todo)}, считаем {len(todo)}",
           file=sys.stderr)
@@ -56,17 +64,19 @@ def run_one(vname: str, dname: str, cfg: dict, review: int) -> dict:
     with ThreadPoolExecutor(model.workers) as ex:
         for k, (f, p) in enumerate(ex.map(one, todo), 1):
             preds[f] = p
-            flag = "ERR " + p["error"][:80] if p["error"] else ("BADJSON" if p["bad_json"] else f"{len(p['objects'])} obj")
-            print(f"  {k}/{len(todo)} {f}: {flag} {p['seconds']}s", file=sys.stderr)
+            flag = ("ERR " + p["error"][:80]) if p.get("error") else (
+                "BADJSON" if p.get("bad_json") else f"{len(get_objects(p))} obj")
+            print(f"  {k}/{len(todo)} {f}: {flag} {p.get('seconds', 0)}s", file=sys.stderr)
             if k % 10 == 0:  # промежуточное сохранение: прерванный прогон не теряется
-                cache_path.write_text(json.dumps(preds, ensure_ascii=False, indent=1))
-    cache_path.write_text(json.dumps(preds, ensure_ascii=False, indent=1))
+                write_json_atomic(cache_path, preds)
+    write_json_atomic(cache_path, preds)
 
     if ds.get("types"):  # набор размечен не по всем типам: остальные не оцениваем
         keep = set(ds["types"])
         labels = [{**lab, "objects": [o for o in lab["objects"] if o["type"] in keep]} for lab in labels]
-        preds = {f: {**p, "objects": [o for o in p["objects"] if o["type"] in keep]} for f, p in preds.items()}
-    m = evaluate(labels, preds, ds.get("iou", 0.5))
+        preds = {f: {**p, "objects": [o for o in get_objects(p) if o.get("type") in keep]}
+                 for f, p in preds.items()}
+    m = evaluate(labels, preds, ds.get("iou", 0.5), cfg.get("cost"))
     (out / "metrics.json").write_text(json.dumps(m, ensure_ascii=False, indent=1))
     if review:
         rdir = out / "review"
@@ -76,7 +86,7 @@ def run_one(vname: str, dname: str, cfg: dict, review: int) -> dict:
         by_file = {lab["file"]: lab for lab in labels}
         for k, w in enumerate(m["worst"][:review], 1):
             lab = by_file[w["file"]]
-            im = annotate(Image.open(images / w["file"]), preds[w["file"]]["objects"], gt=lab["objects"])
+            im = annotate(Image.open(images / w["file"]), get_objects(preds[w["file"]]), gt=lab["objects"])
             im.save(rdir / f"{k:02d}_{Path(w['file']).stem}.jpg", quality=85)
     return m
 
@@ -93,8 +103,20 @@ def main() -> None:
         res = {v: run_one(v, dname, cfg, args.review) for v in args.variant}
         print(f"\n=== {dname}")
         print("metric".ljust(20) + "".join(v[:15].rjust(16) for v in res))
+
+        def cell(value):
+            if value is None:
+                return "—".rjust(16)
+            if isinstance(value, bool):
+                return str(int(value)).rjust(16)
+            if isinstance(value, int):
+                return f"{value:16d}"
+            if isinstance(value, float):
+                return f"{value:16.3f}"
+            return str(value)[:16].rjust(16)
+
         for k in ROWS:
-            print(k.ljust(20) + "".join((f"{r[k]:16.3f}" if isinstance(r[k], float) else f"{r[k]:16d}") for r in res.values()))
+            print(k.ljust(20) + "".join(cell(r.get(k)) for r in res.values()))
         for v, r in res.items():
             print(f"\n{v}: по типам " + json.dumps(r["per_type"], ensure_ascii=False))
             if r["type_confusion"]:

@@ -20,7 +20,10 @@ from run import load_config  # noqa: E402
 from vlm import VLM, parse_json, to_jpeg  # noqa: E402
 
 
-def build_prompt(labels: list[str], hint: str | None = None, examples: list[str] | None = None) -> str:
+def build_prompt(labels: list[str], hint: str | None = None, examples: list[str] | None = None,
+                 prompt_mode: str = "default") -> str:
+    if prompt_mode not in ("default", "recall"):
+        raise ValueError(f"неизвестный prompt_mode={prompt_mode!r}")
     opts = "\n".join(f"{k}. {lab}" for k, lab in enumerate(labels, 1))
     p = f"""Ты инспектор сетевой инфраструктуры. На фото — объект городской инфраструктуры.
 Выбери ровно один класс (тип объекта и состояние) из списка:
@@ -36,20 +39,33 @@ def build_prompt(labels: list[str], hint: str | None = None, examples: list[str]
     if examples:
         p += "\nПримеры описаний экспертов для похожих фото (пиши в таком же стиле):\n" + \
              "\n".join(f"- {e}" for e in examples) + "\n"
+    if prompt_mode == "recall":
+        p += """
+Если ни один класс нельзя выбрать надёжно, верни class=null и review=true.
+Если объект исправен — выбирай класс с исправным состоянием, не ставь дефект «на всякий случай»."""
     p += """
-Ответь ТОЛЬКО JSON: {"class": <номер класса>, "description": "<1–2 предложения по-русски: что за объект и в чём дефект>"}"""
+Ответь ТОЛЬКО JSON: {"class": <номер класса или null>, "review": false, "review_reason": null,
+"description": "<1–2 предложения по-русски: что за объект и в чём дефект>"}"""
     return p
 
 
 def classify(vlm: VLM, img: Image.Image, labels: list[str], hint=None, examples=None) -> dict:
-    r = vlm._ask(to_jpeg(img, vlm.max_side), build_prompt(labels, hint, examples), parse_json)
+    prompt = build_prompt(labels, hint, examples, prompt_mode=getattr(vlm, "prompt_mode", "default"))
+    r = vlm._ask(to_jpeg(img, vlm.max_side), prompt, parse_json)
     a = r.pop("value") or {}
     try:
         k = int(a.get("class")) - 1
         label = labels[k] if 0 <= k < len(labels) else None
     except (TypeError, ValueError):
         label = None
-    return {**r, "label": label, "description": str(a.get("description") or "")}
+    review = bool(a.get("review"))
+    error = r.get("error")
+    if label is None and not review and not error:
+        # Схема не позволяет молча выбрать первый класс: отсутствие класса без review — ошибка.
+        error = "class=null без review"
+    return {**r, "error": error, "label": label, "review": review or label is None,
+            "review_reason": a.get("review_reason"),
+            "description": str(a.get("description") or "")}
 
 
 def main() -> None:

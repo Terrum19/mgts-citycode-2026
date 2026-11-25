@@ -16,6 +16,7 @@ cabinet_tilted = "шкаф: наклонён, сдвинут с цоколя"
 cables_exposed = "шкаф/короб/ввод: из корпуса торчат кабели, оголённый кабель"
 cable_coil_unwound = "запас кабеля размотался («борода»), висит ниже нормы"
 equipment_fallen = "муфта или короб сорваны с крепления, висят на кабеле или упали"
+other_damage = "повреждение есть, но его вид не подходит ни под один пункт выше"
 
 # Короткие подписи для отчёта и картинок (на финале дописать сюда их виды повреждений)
 [names]
@@ -37,6 +38,7 @@ cables_exposed = "Оголённые кабели"
 cable_coil_unwound = "Размотан запас кабеля"
 equipment_fallen = "Оборудование сорвано"
 unknown = "Повреждение (вид не определён)"
+other_damage = "Повреждение (другой вид)"
 
 # Размеченные наборы для run.py. Панорамы: data/labels.json из src/label/export.py.
 [datasets.pano_dev]
@@ -65,6 +67,8 @@ model = "facebook/mask2former-swin-large-mapillary-vistas-panoptic"
 classes = { "Manhole" = "manhole", "Utility Pole" = "pole", "Pole" = "pole", "Junction Box" = "cabinet" }
 min_score = 0.5
 min_side = 12        # меньше — VLM всё равно ничего не разглядит
+min_max_side_by_type = { pole = 80 }  # мелкие обрезки столбов (max < 80 px) — почти всегда шум
+min_score_by_type = { pole = 0.65 }   # слабые опоры дают большинство ложных срабатываний
 pad = 0.2            # запас вокруг объекта при вырезе
 crop_min_side = 160
 shortest_edge = 800  # вход детектора; больше — точнее на мелких люках, но медленнее
@@ -107,6 +111,7 @@ model = "qwen/qwen3-vl-235b-a22b-instruct"
 key_env = "OPENROUTER_API_KEY"
 workers = 6
 prompt_mode = "recall"
+retry_empty = true
 
 [variants.gemma31_free]
 base_url = "https://openrouter.ai/api/v1"
@@ -127,6 +132,7 @@ base_url = "http://localhost:8080/v1"
 model = "mlx-community/Qwen3-VL-8B-Instruct-4bit"
 key_env = ""
 workers = 1
+prompt_mode = "recall"
 
 # та же Gemma, но платная (бесплатный пул часто отдаёт 429)
 [variants.gemma31]
@@ -143,6 +149,7 @@ model = "google/gemma-4-26b-a4b-it"
 key_env = "OPENROUTER_API_KEY"
 workers = 2
 bbox_format = "yxyx"
+strict_bad = false
 
 # Qwen3.8-27B (dense, 0..1000 grounding)
 [variants.qwen38]
@@ -156,6 +163,7 @@ workers = 6
 kind = "det_vlm"
 vlm = "qwen235"
 context_mode = "both"
+not_target = "drop"
 workers = 4
 
 [variants.det_dino]
@@ -207,8 +215,78 @@ kind = "photo_dino"
 checkpoint = "out/final/photo_dino.joblib"
 qwen = "qwen235"        # было забыто: VLM в photo_dino молча не включалась
 cascade = true          # VLM только на спорные кадры и описания bad, а не на каждое фото
+hint_mode = "none"      # validation и production не должны видеть разные подсказки
 p_bad_min = 0.60
 p_bad_max_ok = 0.40
 status_conf_min = 0.65
 margin_min = 0.10       # |P(bad) - P(ok)| меньше -> review
 describe_bad = true
+
+
+# Отбор связки в final.py: ограничения и стартовые стоимости в условных единицах.
+# Это конфигурация для сравнения, а не заявленная бизнес-стоимость МГТС.
+[selection]
+min_bad = 3
+min_ok = 5
+min_triage_recall = 0.70
+max_review_rate = 0.35
+
+[cost]
+fn = 20.0
+fp = 2.0
+review = 1.0
+
+# Quality Gate по умолчанию выключен: пороги не откалиброваны, включать только после
+# отдельной проверки на четырёх группах плохих кадров.
+[quality_gate]
+enabled = false
+max_side = 320
+min_mean = 25.0
+max_mean = 235.0
+min_std = 18.0
+min_sharpness = 40.0
+max_overexposed = 0.50
+
+# UI: offline-схема координат вместо st.map, которому может понадобиться подложка.
+[app]
+offline_map = true
+
+# Явные offline/local варианты: специализированные секции содержат только отличия
+# от базовой (extends), чтобы не дублировать пороги десятки раз.
+[variants.det_dino_offline]
+extends = "det_dino"
+vlm = ""
+offline = true
+
+[variants.det_dino_local]
+extends = "det_dino"
+vlm = "qwen8b_local"
+offline = true
+
+[variants.boxes_dino_offline]
+extends = "boxes_dino"
+vlm = ""
+offline = true
+
+[variants.boxes_dino_local]
+extends = "boxes_dino"
+vlm = "qwen8b_local"
+offline = true
+
+[variants.photo_dino_offline]
+extends = "photo_dino"
+qwen = ""
+offline = true
+
+[variants.photo_dino_local]
+extends = "photo_dino"
+qwen = "qwen8b_local"
+offline = true
+
+# Рамки организатора без совместимого checkpoint: VLM оценивает каждый вырез.
+[variants.boxes_qwen235]
+kind = "boxes_vlm"
+vlm = "qwen235"
+context_mode = "both"
+not_target = "review"
+workers = 4

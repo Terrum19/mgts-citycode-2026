@@ -19,6 +19,7 @@
 """
 import hashlib
 import json
+import os
 import sys
 import threading
 import time
@@ -26,6 +27,11 @@ import time
 from PIL import Image
 
 BACKENDS = ("mask2former", "grounding_dino", "rtdetr")
+
+
+def local_only(cfg: dict | None) -> bool:
+    """Offline-режим: только локальные файлы, без сетевого fallback Hugging Face."""
+    return bool((cfg or {}).get("offline") or os.environ.get("HF_HUB_OFFLINE"))
 
 
 def backend_name(cfg: dict | None) -> str:
@@ -57,15 +63,28 @@ def dedup(found: list[dict], threshold: float = 0.5) -> list[dict]:
     return kept
 
 
-def _box(values, w: int, h: int, min_side: float) -> list[int] | None:
+def _box(values, w: int, h: int, min_side: float, min_max_side: float = 0) -> list[int] | None:
     """Рамка из float -> целые пиксели внутри кадра; слишком мелкая отбрасывается."""
     x1, y1, x2, y2 = (float(v) for v in values)
     x1, x2 = sorted((x1, x2))
     y1, y2 = sorted((y1, y2))
     box = [max(0, int(round(x1))), max(0, int(round(y1))), min(w, int(round(x2))), min(h, int(round(y2)))]
-    if min(box[2] - box[0], box[3] - box[1]) < min_side:
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    if min(bw, bh) < min_side:
+        return None
+    if min_max_side > 0 and max(bw, bh) < min_max_side:
         return None
     return box
+
+
+def _filter_box(values, w: int, h: int, typ: str, score: float, cfg: dict) -> list[int] | None:
+    """Проверка порога score и размеров рамки с учётом общих и per-type настроек в cfg."""
+    min_score_by_type = cfg.get("min_score_by_type") or {}
+    if typ in min_score_by_type and float(score) < float(min_score_by_type[typ]):
+        return None
+    min_side = float((cfg.get("min_side_by_type") or {}).get(typ, cfg.get("min_side", 12)))
+    min_max_side = float((cfg.get("min_max_side_by_type") or {}).get(typ, cfg.get("min_max_side", 0)))
+    return _box(values, w, h, min_side, min_max_side=min_max_side)
 
 
 class _Mask2FormerBackend:
@@ -77,11 +96,12 @@ class _Mask2FormerBackend:
 
         self.torch, self.cfg = torch, cfg
         self.device = cfg.get("device", "cpu")
-        self.proc = AutoImageProcessor.from_pretrained(cfg["model"])
+        self.proc = AutoImageProcessor.from_pretrained(cfg["model"], local_files_only=local_only(cfg))
         # по умолчанию процессор растягивает кадр до 2048 по короткой стороне — на CPU это медленно
         self.size = ({"shortest_edge": cfg["shortest_edge"], "longest_edge": cfg.get("longest_edge", 2048)}
                      if cfg.get("shortest_edge") else None)
-        self.model = Mask2FormerForUniversalSegmentation.from_pretrained(cfg["model"]).eval().to(self.device)
+        self.model = Mask2FormerForUniversalSegmentation.from_pretrained(
+            cfg["model"], local_files_only=local_only(cfg)).eval().to(self.device)
         names = self.model.config.id2label
         self.keep = {int(i): cfg["classes"][n] for i, n in names.items() if n in cfg["classes"]}
         missing = set(cfg["classes"]) - set(names.values())
@@ -102,14 +122,19 @@ class _Mask2FormerBackend:
         for s in res["segments_info"]:
             if s["label_id"] not in self.keep:
                 continue
+            typ = self.keep[s["label_id"]]
+            score = float(s["score"])
+            min_score_by_type = cfg.get("min_score_by_type") or {}
+            if typ in min_score_by_type and score < float(min_score_by_type[typ]):
+                continue
             ys, xs = torch.where(seg == s["id"])
             if len(xs) == 0:
                 continue
-            box = _box([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1], w, h, cfg.get("min_side", 12))
+            box = _filter_box([xs.min(), ys.min(), xs.max() + 1, ys.max() + 1], w, h, typ, score, cfg)
             if box is None:
                 continue
-            found.append({"type": self.keep[s["label_id"]], "bbox": box,
-                          "score": round(float(s["score"]), 3), "label": names[s["label_id"]]})
+            found.append({"type": typ, "bbox": box,
+                          "score": round(score, 3), "label": names[s["label_id"]]})
         return found
 
 
@@ -125,8 +150,9 @@ class _GroundingDinoBackend:
         self.prompts = {str(k): str(v) for k, v in (cfg.get("prompts") or {}).items()}
         if not self.prompts:
             raise ValueError("[detector].prompts нужен для backend=grounding_dino: {наш_тип = \"текст. ещё текст.\"}")
-        self.proc = AutoProcessor.from_pretrained(cfg["model"])
-        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(cfg["model"]).eval().to(self.device)
+        self.proc = AutoProcessor.from_pretrained(cfg["model"], local_files_only=local_only(cfg))
+        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(
+            cfg["model"], local_files_only=local_only(cfg)).eval().to(self.device)
 
     def _post(self, outputs, input_ids, w: int, h: int) -> dict:
         kwargs = {"text_threshold": self.cfg.get("text_threshold", 0.25), "target_sizes": [(h, w)]}
@@ -153,7 +179,7 @@ class _GroundingDinoBackend:
                 labels = result.get("labels")
             labels = [] if labels is None else labels
             for box, score, label in zip(result["boxes"], result["scores"], labels):
-                prepared = _box(box.tolist(), w, h, cfg.get("min_side", 12))
+                prepared = _filter_box(box.tolist(), w, h, typ, float(score), cfg)
                 if prepared is None:
                     continue
                 found.append({"type": typ, "bbox": prepared, "score": round(float(score), 3), "label": str(label)})
@@ -169,8 +195,9 @@ class _RTDETRBackend:
 
         self.torch, self.cfg = torch, cfg
         self.device = cfg.get("device", "cpu")
-        self.proc = AutoImageProcessor.from_pretrained(cfg["model"])
-        self.model = AutoModelForObjectDetection.from_pretrained(cfg["model"]).eval().to(self.device)
+        self.proc = AutoImageProcessor.from_pretrained(cfg["model"], local_files_only=local_only(cfg))
+        self.model = AutoModelForObjectDetection.from_pretrained(
+            cfg["model"], local_files_only=local_only(cfg)).eval().to(self.device)
         mapping = cfg.get("classes") or {}
         self.keep = {int(i): mapping[name] for i, name in self.model.config.id2label.items() if name in mapping}
         missing = set(mapping) - set(self.model.config.id2label.values())
@@ -192,10 +219,11 @@ class _RTDETRBackend:
             label_id = int(label)
             if label_id not in self.keep:
                 continue
-            prepared = _box(box.tolist(), w, h, cfg.get("min_side", 12))
+            typ = self.keep[label_id]
+            prepared = _filter_box(box.tolist(), w, h, typ, float(score), cfg)
             if prepared is None:
                 continue
-            found.append({"type": self.keep[label_id], "bbox": prepared,
+            found.append({"type": typ, "bbox": prepared,
                           "score": round(float(score), 3), "label": names[label_id]})
         return found
 

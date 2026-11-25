@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "57f317a41669a2d394c77b624a01baf9fd18d0d0",
+  "legacy_labels_sha256": "e4aa7b0d980966ff38d16bbc27a1b7c74f9f648125cdc58fa1a839906e46f83a",
+  "notes": [
+    "pano_test уже использовался прогонами qwen235 и gemma26: его нельзя снова использовать для выбора.",
+    "pano_dev остаётся development split, а не чистым holdout.",
+    "holdout_v1 должен состоять из новых изображений, разметка замораживается до первого прогона."
+  ],
+  "datasets": {
+    "pano_dev": {
+      "role": "development",
+      "selection_eligible": true,
+      "labels_sha256": "e4aa7b0d980966ff38d16bbc27a1b7c74f9f648125cdc58fa1a839906e46f83a"
+    },
+    "pano_test": {
+      "role": "contaminated",
+      "selection_eligible": false,
+      "contaminated_by": ["pano_test__qwen235", "pano_test__gemma26"]
+    }
+  },
+  "holdout_v1": {
+    "status": "required_new_data",
+    "labels_sha256": null,
+    "selection_eligible": false
+  }
+}

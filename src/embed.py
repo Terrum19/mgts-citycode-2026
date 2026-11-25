@@ -28,16 +28,29 @@ class Embedder:
         cfg = json.loads((self.path / "config.json").read_text())
         if "architecture" in cfg:  # timm
             import timm
+            import torch
             self.kind = "timm"
-            self.model = timm.create_model(cfg["architecture"], pretrained=True, num_classes=0,
-                                           pretrained_cfg_overlay={"file": str(self.path / "model.safetensors")})
+            # pretrained=True у timm означает сетевой fallback; создаём архитектуру и
+            # загружаем локальный state dict явно.
+            self.model = timm.create_model(cfg["architecture"], pretrained=False, num_classes=0)
+            weights = self.path / "model.safetensors"
+            if weights.exists():
+                from safetensors.torch import load_file
+                state = load_file(str(weights))
+            elif (self.path / "pytorch_model.bin").exists():
+                state = torch.load(self.path / "pytorch_model.bin", map_location="cpu", weights_only=True)
+            else:
+                raise FileNotFoundError(f"нет локальных весов timm в {self.path}")
+            missing, unexpected = self.model.load_state_dict(state, strict=False)
+            if missing:
+                raise RuntimeError(f"timm state dict неполный: missing={missing[:5]}")
             dc = timm.data.resolve_data_config(model=self.model)
             self.size = size or dc["input_size"][-1]
             self.mean, self.std = dc["mean"], dc["std"]
         else:  # transformers (DINOv2)
             from transformers import AutoModel
             self.kind = "hf"
-            self.model = AutoModel.from_pretrained(self.path)
+            self.model = AutoModel.from_pretrained(self.path, local_files_only=True)
             self.size = size or 224
             self.mean, self.std = IMAGENET
         self.model = self.model.eval().to(device)

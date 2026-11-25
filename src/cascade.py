@@ -30,7 +30,12 @@
 """
 import json
 
+from results import normalize_reasons
+
+# Классы обученного классификатора. review сюда НЕ входит: summarize() проверяет
+# готовность по наличию обученных ok/bad, а не по статусу ответа VLM.
 STATUSES = ("ok", "bad")
+ANSWER_STATUSES = ("ok", "bad", "review")
 
 
 def as_tuple(cls) -> list:
@@ -121,13 +126,16 @@ def pick(summary: dict, classes, decision: str) -> tuple[str | None, str | None]
 
 
 def clean_state(o: dict, tax: dict) -> tuple[str, str | None]:
-    """status/damage к допустимым значениям: bad без вида из списка -> damage "unknown".
+    """status/damage к допустимым значениям.
 
-    Перенесено из vlm.py; vlm.py импортирует функцию отсюда и отдаёт её под прежним именем.
+    Неизвестный/отсутствующий статус -> review, а не ok: молчаливое превращение
+    «maybe» в «исправен» — самый опасный способ потерять дефект. explicit review
+    всегда имеет damage=None; bad с видом вне таксономии сохраняет "unknown".
     """
-    status = "bad" if str(o.get("status", "")).lower() == "bad" else "ok"
+    raw = str(o.get("status", "")).strip().lower()
+    status = raw if raw in ANSWER_STATUSES else "review"
     damage = o.get("damage") if status == "bad" else None
-    if status == "bad" and damage not in tax["damage"]:
+    if status == "bad" and damage not in (tax or {}).get("damage", {}):
         damage = "unknown"
     return status, damage
 
@@ -135,14 +143,15 @@ def clean_state(o: dict, tax: dict) -> tuple[str, str | None]:
 def answer_error(answer: dict | None) -> str | None:
     """Почему ответ VLM нельзя использовать, или None.
 
-    Ошибкой считается и статус вне ok/bad: clean_state превратил бы его в ok, а для каскада
-    это опаснее, чем честный review.
+    Допустимы ok/bad/review. Неизвестный статус — ошибка схемы: clean_state перевёл бы
+    его в безопасный review, но каскад должен знать, что ответ битый, а не считать
+    это осознанным решением VLM.
     """
     if not isinstance(answer, dict):
         return "ответ VLM не JSON-объект"
     if answer.get("is_object") is False:
         return None
-    if str(answer.get("status", "")).lower() not in STATUSES:
+    if str(answer.get("status", "")).strip().lower() not in ANSWER_STATUSES:
         return f"недопустимый status={answer.get('status')!r}"
     return None
 
@@ -190,18 +199,27 @@ def merge_vlm(base: dict, answer: dict | None, tax: dict, *, not_target: str = "
     if answer is None or not isinstance(answer, dict):
         return out
     description = str(answer.get("description") or "")
+    if not authoritative:
+        # description-only: is_object=false не удаляет подтверждённый DINO bad
+        out["description"] = description or out.get("description", "")
+        return out
     if answer.get("is_object") is False:
         if not_target == "drop":
             return None
-        out.update(status="review", damage=None, description=description)
-        return out
-    if not authoritative:
-        out["description"] = description or out.get("description", "")
+        out.update(status="review", damage=None, description=description,
+                   review_reasons=normalize_reasons(list(out.get("review_reasons") or []) + ["not_target"]))
         return out
 
     status, damage = clean_state(answer, tax)
-    out.update(status=status, damage=damage, description=description)
+    reasons = list(out.get("review_reasons") or [])
+    if status == "review":
+        reasons.append("low_confidence")
+    out.update(status=status, damage=damage, description=description,
+               review_reasons=normalize_reasons(reasons))
     typ = answer.get("type")
     if not out.get("type") and typ in (tax or {}).get("object_types", {}):
         out["type"] = typ
+    if status in ("ok", "bad") and not out.get("type"):
+        out.update(status="review", damage=None,
+                   review_reasons=normalize_reasons(list(out.get("review_reasons") or []) + ["taxonomy_mismatch"]))
     return out
