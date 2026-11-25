@@ -6,14 +6,19 @@
 - кадры с флагом bad_frame не оцениваются;
 - объекты типа "other" — «не важно»: их не обязательно находить, и предсказание на их месте не ошибка;
 - статус "unclear" — объект ищем, но в метриках статуса не участвует;
-- объекты сопоставляются жадно по IoU внутри одного типа. Основной порог 0.5; на панорамах объекты
-  мелкие и рамки неточные, поэтому показываем и порог 0.3.
+- объекты сопоставляются один к одному внутри типа: IoU ≥ 0.10, расстояние между центрами
+  ≤ 25% диагонали эталонной рамки; ближайшие центры проверяются первыми;
+- технические метрики рамок при IoU 0.50 и 0.30 считаются дополнительно.
 """
 import argparse
 import json
 from collections import Counter
+from functools import partial
+from math import hypot
 
 IGNORE_TYPES = {"other"}
+MIN_CENTER_MATCH_IOU = 0.10
+MAX_CENTER_DISTANCE_RATIO = 0.25
 
 
 def iou(a, b) -> float:
@@ -24,19 +29,45 @@ def iou(a, b) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def match(gt: list, pr: list, thr: float, same_type: bool = True) -> list[tuple[int, int]]:
-    """Жадное сопоставление по убыванию IoU -> пары (индекс gt, индекс pred)."""
-    pairs = sorted(((iou(g["bbox"], p["bbox"]), i, j) for i, g in enumerate(gt) for j, p in enumerate(pr)
-                    if not same_type or g["type"] == p["type"]), reverse=True)
+def _greedy_pairs(pairs) -> list[tuple[int, int]]:
     used_g, used_p, out = set(), set(), []
-    for v, i, j in pairs:
-        if v < thr:
-            break
+    for _, i, j in sorted(pairs, reverse=True):
         if i not in used_g and j not in used_p:
             used_g.add(i)
             used_p.add(j)
             out.append((i, j))
     return out
+
+
+def match(gt: list, pr: list, thr: float, same_type: bool = True) -> list[tuple[int, int]]:
+    """Жадное сопоставление по убыванию IoU."""
+    pairs = ((overlap, i, j)
+             for i, g in enumerate(gt) for j, p in enumerate(pr)
+             if not same_type or g["type"] == p["type"]
+             if (overlap := iou(g["bbox"], p["bbox"])) >= thr)
+    return _greedy_pairs(pairs)
+
+
+def match_centers(gt: list, pr: list, same_type: bool = True) -> list[tuple[int, int]]:
+    """Ближайшие центры рамок при достаточном пересечении."""
+    pairs = []
+    for i, g in enumerate(gt):
+        a = g["bbox"]
+        diagonal = hypot(a[2] - a[0], a[3] - a[1])
+        if not diagonal:
+            continue
+        for j, p in enumerate(pr):
+            if same_type and g["type"] != p["type"]:
+                continue
+            b = p["bbox"]
+            if iou(a, b) < MIN_CENTER_MATCH_IOU:
+                continue
+            dx = (a[0] + a[2] - b[0] - b[2]) / 2
+            dy = (a[1] + a[3] - b[1] - b[3]) / 2
+            distance = hypot(dx, dy) / diagonal
+            if distance <= MAX_CENTER_DISTANCE_RATIO:
+                pairs.append((-distance, i, j))
+    return _greedy_pairs(pairs)
 
 
 def prf(tp, fp, fn) -> tuple[float, float, float]:
@@ -45,8 +76,11 @@ def prf(tp, fp, fn) -> tuple[float, float, float]:
     return p, r, (2 * p * r / (p + r) if p + r else 0.0)
 
 
-def evaluate(labels: list[dict], preds: dict[str, dict], thr: float = 0.5) -> dict:
-    det = {t: Counter() for t in (thr, 0.3)}   # tp / gt / pr по порогам
+def evaluate(labels: list[dict], preds: dict[str, dict], thr: float | None = None) -> dict:
+    """По умолчанию сравнивает центры. Явный thr возвращает протокол по IoU."""
+    match_main = match_centers if thr is None else partial(match, thr=thr)
+    det_iou_hits = {0.5: 0, 0.3: 0}
+    det_tp = det_gt = det_pred = 0
     per_type = {}                              # тип -> Counter(tp, gt, pr) при основном пороге
     repair_tp = repair_pred = review = 0
     any_type_tp = 0                            # нашли место объекта, но, возможно, с другим типом
@@ -73,25 +107,26 @@ def evaluate(labels: list[dict], preds: dict[str, dict], thr: float = 0.5) -> di
               if not any(iou(q["bbox"], o["bbox"]) >= 0.3 for o in ign)
               or any(iou(q["bbox"], g["bbox"]) >= 0.3 for g in gt)]
 
-        for t in det:
-            det[t]["tp"] += len(match(gt, pr, t))
-            det[t]["gt"] += len(gt)
-            det[t]["pr"] += len(pr)
-        m = match(gt, pr, thr)
+        m = match_main(gt, pr)
+        det_tp += len(m)
+        det_gt += len(gt)
+        det_pred += len(pr)
+        for t in det_iou_hits:
+            det_iou_hits[t] += len(m) if t == thr else len(match(gt, pr, t))
         for o in gt:
             per_type.setdefault(o["type"], Counter())["gt"] += 1
         for q in pr:
             per_type.setdefault(q["type"], Counter())["pr"] += 1
         for i, _ in m:
             per_type[gt[i]["type"]]["tp"] += 1
-        ma = match(gt, pr, thr, same_type=False)
+        ma = match_main(gt, pr, same_type=False)
         any_type_tp += len(ma)
         for i, j in ma:
             type_conf[(gt[i]["type"], pr[j]["type"])] += 1
 
         bad_gt = [o for o in gt if o["status"] == "bad"]
         bad_pr = [o for o in pr if o["status"] == "bad"]
-        confirmed = match(bad_gt, bad_pr, thr)
+        confirmed = match_main(bad_gt, bad_pr)
         repair_tp += len(confirmed)
         repair_pred += len(bad_pr)
         review += sum(o["status"] == "review" for o in pr)
@@ -113,13 +148,18 @@ def evaluate(labels: list[dict], preds: dict[str, dict], thr: float = 0.5) -> di
                           "status_err": status_err, "missed_bad": len(confirmed) < len(bad_gt)})
 
     n = len(labels) - skipped
-    out = {"images": n, "skipped_bad_frames": skipped, "gt_objects": det[thr]["gt"],
-           "gt_bad_objects": n_bad_gt, "gt_bad_images": img[(True, True)] + img[(True, False)]}
-    for t, c in det.items():
-        sfx = "" if t == thr else f"@{t}"
-        out[f"det_precision{sfx}"] = c["tp"] / c["pr"] if c["pr"] else 0.0
-        out[f"det_recall{sfx}"] = c["tp"] / c["gt"] if c["gt"] else 0.0
-    out["det_recall_anytype"] = any_type_tp / det[thr]["gt"] if det[thr]["gt"] else 0.0
+    matching = ({"method": "center", "max_center_distance_ratio": MAX_CENTER_DISTANCE_RATIO,
+                 "min_iou": MIN_CENTER_MATCH_IOU}
+                if thr is None else {"method": "iou", "threshold": thr})
+    out = {"images": n, "skipped_bad_frames": skipped, "gt_objects": det_gt,
+           "gt_bad_objects": n_bad_gt, "gt_bad_images": img[(True, True)] + img[(True, False)],
+           "matching": matching,
+           "det_precision": det_tp / det_pred if det_pred else 0.0,
+           "det_recall": det_tp / det_gt if det_gt else 0.0,
+           "det_recall_anytype": any_type_tp / det_gt if det_gt else 0.0}
+    for t, hits in det_iou_hits.items():
+        out[f"det_precision@{t}"] = hits / det_pred if det_pred else 0.0
+        out[f"det_recall@{t}"] = hits / det_gt if det_gt else 0.0
     ip, ir, if1 = prf(img[(True, True)], img[(False, True)], img[(True, False)])
     sp, sr, sf1 = prf(st[("bad", "bad")], st[("ok", "bad")], st[("bad", "ok")] + st[("bad", "review")])
     rp, rr, rf = prf(repair_tp, repair_pred - repair_tp, n_bad_gt - repair_tp)
@@ -156,7 +196,7 @@ def main() -> None:
     ap.add_argument("labels")
     ap.add_argument("preds")
     ap.add_argument("--split")
-    ap.add_argument("--iou", type=float, default=0.5)
+    ap.add_argument("--iou", type=float, help="использовать только IoU вместо правила по центрам")
     args = ap.parse_args()
     m = evaluate(load_labels(args.labels, args.split), json.load(open(args.preds)), args.iou)
     print(json.dumps(m, ensure_ascii=False, indent=1))
