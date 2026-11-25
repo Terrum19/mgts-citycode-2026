@@ -15,7 +15,13 @@ import requests
 
 ROOT = Path(__file__).resolve().parents[2]
 ENV = dict(re.findall(r"^(LABEL_STUDIO_\w+)=(.*)$", (ROOT / ".env").read_text(), re.M))
-URL, H = ENV["LABEL_STUDIO_URL"], {"Authorization": "Token " + ENV["LABEL_STUDIO_TOKEN"]}
+URL = ENV["LABEL_STUDIO_URL"].strip().strip("\"'").rstrip("/")
+TOKEN = ENV["LABEL_STUDIO_TOKEN"].strip().strip("\"'")
+TOKEN_TYPE = ENV.get("LABEL_STUDIO_TOKEN_TYPE", "auto").strip().lower()
+if TOKEN_TYPE not in ("auto", "legacy", "pat"):
+    raise SystemExit("LABEL_STUDIO_TOKEN_TYPE должен быть auto, legacy или pat")
+IS_PAT = TOKEN_TYPE == "pat" or (TOKEN_TYPE == "auto" and TOKEN.count(".") == 2)
+H = {} if IS_PAT else {"Authorization": "Token " + TOKEN}
 TITLES = ("МГТС dev: проверка авторазметки", "МГТС test: разметка с нуля")
 
 
@@ -54,12 +60,65 @@ def convert(task: dict) -> dict | None:
             "annotator": ann.get("completed_by")}
 
 
+def refresh_access():
+    try:
+        response = requests.post(URL + "/api/token/refresh/", json={"refresh": TOKEN}, timeout=60,
+                                 allow_redirects=False)
+    except requests.RequestException:
+        raise SystemExit("Не удалось подключиться к Label Studio для обмена PAT. Проверьте ZeroTier.")
+    if not response.ok:
+        raise SystemExit(f"Обмен Personal Access Token: HTTP {response.status_code}. "
+                         "Проверьте, что PAT создан на этом сервере, не истёк и не отозван.")
+    try:
+        access = response.json()["access"]
+        if not isinstance(access, str) or not access:
+            raise ValueError()
+    except (ValueError, KeyError, TypeError):
+        raise SystemExit("Сервер не вернул access token при обмене PAT.")
+    H["Authorization"] = "Bearer " + access
+
+
+def get_json(path, **kwargs):
+    if IS_PAT and not H:
+        refresh_access()
+    try:
+        response = requests.get(URL.rstrip("/") + path, headers=H, **kwargs)
+        if response.status_code == 401 and IS_PAT:
+            refresh_access()
+            response = requests.get(URL.rstrip("/") + path, headers=H, **kwargs)
+    except requests.RequestException:
+        raise SystemExit("Не удалось подключиться к Label Studio. Проверьте сервер и ZeroTier.")
+    if not response.ok:
+        hint = ("Проверьте токен и LABEL_STUDIO_TOKEN_TYPE (auto / legacy / pat)." if response.status_code == 401
+                else "Проверьте права доступа к проектам." if response.status_code == 403
+                else "Проверьте адрес сервера и доступность API.")
+        raise SystemExit(f"Label Studio: HTTP {response.status_code} при GET {path}. {hint}")
+    try:
+        return response.json()
+    except ValueError:
+        raise SystemExit(f"Label Studio вернул не JSON при GET {path}. Проверьте адрес API.")
+
+
+def project_list(payload):
+    rows = payload if isinstance(payload, list) else payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(rows, list) or any(not isinstance(p, dict) or "title" not in p or "id" not in p for p in rows):
+        raise SystemExit("Неожиданный формат списка проектов: ожидается массив или объект с массивом results. "
+                         "Экспорт остановлен; существующая разметка сохранена.")
+    return rows
+
+
 def main() -> None:
-    projects = {p["title"]: p["id"] for p in requests.get(f"{URL}/api/projects", headers=H, params={"page_size": 100}, timeout=60).json()["results"]}
+    payload = get_json("/api/projects", params={"page_size": 100}, timeout=60)
+    projects = {p["title"]: p["id"] for p in project_list(payload)}
+    missing = [title for title in TITLES if title not in projects]
+    if missing:
+        raise SystemExit("Не найдены доступные проекты: " + "; ".join(missing))
     labels, total = [], 0
     for title in TITLES:
-        tasks = requests.get(f"{URL}/api/projects/{projects[title]}/export", headers=H,
-                             params={"exportType": "JSON", "download_all_tasks": "true"}, timeout=300).json()
+        tasks = get_json(f"/api/projects/{projects[title]}/export",
+                         params={"exportType": "JSON", "download_all_tasks": "true"}, timeout=300)
+        if not isinstance(tasks, list):
+            raise SystemExit("Неожиданный формат экспорта задач; существующая разметка сохранена.")
         total += len(tasks)
         labels += [x for x in map(convert, tasks) if x]
     labels.sort(key=lambda x: x["file"])

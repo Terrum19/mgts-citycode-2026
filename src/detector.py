@@ -34,7 +34,8 @@ class Detector:
     def detect(self, img: Image.Image) -> list[dict]:
         """-> [{type, bbox [x1,y1,x2,y2] px, score, label}] для нужных классов."""
         torch, cfg = self.torch, self.cfg
-        img = img.convert("RGB")
+        if img.mode != "RGB":
+            img = img.convert("RGB")
         w, h = img.size
         with self.lock, torch.inference_mode():
             inputs = self.proc(images=img, return_tensors="pt", **({"size": self.size} if self.size else {})).to(self.device)

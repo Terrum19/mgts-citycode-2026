@@ -245,6 +245,8 @@ def main():
     ap.add_argument("--C", type=float, default=32.0, help="регуляризация логрега")
     ap.add_argument("--val", type=float, default=0.2, help="доля train для выбора связки")
     ap.add_argument("--no-qwen", action="store_true")
+    ap.add_argument("--training", choices=["auto", "head", "tail"], default="auto",
+                    help="auto: сравнить связки; head: только логрег; tail: дообученный хвост")
     ap.add_argument("--test-format", choices=["auto", "images", "labeled"], default="auto")
     args = ap.parse_args()
 
@@ -281,11 +283,14 @@ def main():
     H, Hf, F = [], [], []
     for imgs in enc.batches(tr_paths, what="train"):
         h = enc.frozen(imgs)
-        H.append(h.half().cpu())
+        if args.training != "head":
+            H.append(h.half().cpu())
         F.append(enc.feats(h))
-    for imgs in enc.batches(tr_paths, flip=True, what="train, отражённые"):
-        Hf.append(enc.frozen(imgs).half().cpu())
-    H, Hf, F = torch.cat(H), torch.cat(Hf), np.concatenate(F)
+    if args.training != "head":
+        for imgs in enc.batches(tr_paths, flip=True, what="train, отражённые"):
+            Hf.append(enc.frozen(imgs).half().cpu())
+        H, Hf = torch.cat(H), torch.cat(Hf)
+    F = np.concatenate(F)
     times["проход по train"] = time.time() - t
     log(f"проход по train готов ({times['проход по train'] / 60:.1f} мин)")
 
@@ -293,11 +298,17 @@ def main():
     t = time.time()
     clf, _ = logreg(F, y, fit, n_cls, args.C)
     P_lr = lr_probs(clf, F[va], n_cls)
-    net = train_tail(enc, H, Hf, y, fit, n_cls, args.epochs, args.lr)
-    P_ft = np.concatenate([tail_probs(net, H[va[s:s + 64]].to(dev)) for s in range(0, len(va), 64)])
-    del net
+    P_ft = None
+    if args.training != "head":
+        net = train_tail(enc, H, Hf, y, fit, n_cls, args.epochs, args.lr)
+        P_ft = np.concatenate([tail_probs(net, H[va[s:s + 64]].to(dev)) for s in range(0, len(va), 64)])
+        del net
     times["обучение на 80%"] = time.time() - t
-    bases = {"логрег": P_lr, "дообучение": P_ft, "логрег+дообучение": (P_lr + P_ft) / 2}
+    bases = {"логрег": P_lr} if args.training != "tail" else {}
+    if P_ft is not None:
+        bases["дообучение"] = P_ft
+        if args.training == "auto":
+            bases["логрег+дообучение"] = (P_lr + P_ft) / 2
     Q_va = None
     if qwen:
         log("жду ответы Qwen на 20%")
