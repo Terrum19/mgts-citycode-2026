@@ -3,7 +3,7 @@
 python src/estimate_effect.py
 python src/estimate_effect.py --variant det_dino --seconds-per-photo 3.2
 
-All defaults are replaceable assumptions. Server rates allocate shared capacity;
+All defaults are replaceable assumptions. Server rates represent incremental electricity for existing hardware;
 for a dedicated server set --fixed-server-month-rub. No OpenRouter/token fees.
 """
 import argparse
@@ -12,15 +12,15 @@ import json
 
 # seconds/photo and allocated RUB/server-hour; throughput is assumed, not measured.
 VARIANTS = {
-    "photo_dino": (0.2, 250),
-    "boxes_dino": (0.4, 250),
-    "det_dino": (3.0, 250),
-    "vlm_8b": (8.0, 250),
-    "det_vlm_8b": (12.0, 250),
-    "cascade_8b": (5.25, 250),
-    "vlm_235b": (8.0, 2500),
-    "det_vlm_235b": (12.0, 2500),
-    "cascade_235b": (5.25, 2500),
+    "photo_dino": (0.2, 2.88),
+    "boxes_dino": (0.4, 2.88),
+    "det_dino": (0.5, 2.88),
+    "vlm_8b": (8.0, 2.88),
+    "det_vlm_8b": (12.0, 2.88),
+    "cascade_8b": (5.25, 2.88),
+    "vlm_235b": (8.0, 19.2),
+    "det_vlm_235b": (12.0, 19.2),
+    "cascade_235b": (5.25, 19.2),
 }
 SCENARIOS = {
     "conservative": (0.30, 0.05),
@@ -52,8 +52,9 @@ def calculate(n, manual_seconds, review_seconds, wage, review_share, audit_share
         "labor_value_saved_rub": saved * wage,
         "realized_benefit_rub": benefit, "net_monthly_rub": net,
         "first_year_net_rub": 12 * net - investment,
-        "roi_first_year": (12 * net - investment) / (investment + 12 * opex),
-        "simple_payback_months": investment / net if net > 0 else None,
+        "roi_first_year": ((12 * net - investment) / (investment + 12 * opex)
+                           if investment + 12 * opex > 0 else None),
+        "simple_payback_months": investment / net if investment > 0 and net > 0 else None,
         "full_operating_rub_per_photo": (h1 * wage + opex) / n,
     }
 
@@ -61,12 +62,12 @@ def calculate(n, manual_seconds, review_seconds, wage, review_share, audit_share
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--variant", choices=VARIANTS)
-    p.add_argument("--photos-month", type=int, default=120000)
+    p.add_argument("--photos-month", type=int, default=100000)
     p.add_argument("--manual-seconds", type=float, default=12)
     p.add_argument("--review-seconds", type=float, default=25)
     p.add_argument("--wage-hour-rub", type=float, default=650)
-    p.add_argument("--support-month-rub", type=float, default=30000)
-    p.add_argument("--investment-rub", type=float, default=600000)
+    p.add_argument("--support-month-rub", type=float, default=0)
+    p.add_argument("--investment-rub", type=float, default=0)
     p.add_argument("--realization", type=float, default=1)
     p.add_argument("--review-share", type=float, help="override all scenarios with measured share")
     p.add_argument("--audit-share", type=float, help="override all scenarios with chosen audit share")
@@ -87,8 +88,6 @@ def main():
                   a.server_hour_rub, a.fixed_server_month_rub):
         if value is not None and value < 0:
             p.error("costs must be nonnegative")
-    if a.investment_rub + a.support_month_rub == 0:
-        p.error("provide positive investment or support for ROI calculation")
     rows = {}
     for name, (seconds, rate) in VARIANTS.items():
         if a.variant and name != a.variant:

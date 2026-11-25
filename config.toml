@@ -58,7 +58,7 @@ types = ["manhole"]   # размечены только люки: опоры н�
 # Детектор для варианта 1 (kind = "det_vlm"). Классы Mapillary Vistas -> наши типы.
 # "Catch Basin" (ливнёвка) намеренно не берём.
 [detector]
-model = "facebook/mask2former-swin-large-mapillary-vistas-panoptic"
+model = "weights/mask2former-mapillary"
 classes = { "Manhole" = "manhole", "Utility Pole" = "pole", "Pole" = "pole", "Junction Box" = "cabinet" }
 min_score = 0.5
 min_side = 12        # меньше — VLM всё равно ничего не разглядит

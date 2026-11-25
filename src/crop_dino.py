@@ -28,7 +28,7 @@ def crop(img, obj, cfg):
 
 
 def train(cfg, annotations, images, split, output):
-    encoder = Embedder(str(ROOT / cfg["encoder"]), size=cfg["size"])
+    encoder = Embedder(str(ROOT / cfg["encoder"]), device=cfg.get("device", "cpu"), size=cfg["size"])
     vectors, targets, batch = [], [], []
     for row in json.loads(annotations.read_text()):
         if split and row.get("split") != split or "bad_frame" in row.get("frame_flags", []):
