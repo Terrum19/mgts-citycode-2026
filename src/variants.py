@@ -93,6 +93,9 @@ def make(name: str, cfg: dict):
     if kind == "frame_crop_qwen":
         from frame_crop_qwen import FrameCropQwen
         return FrameCropQwen(vcfg, cfg)
+    if kind == "cabinet_ensemble":
+        from cabinet_ensemble import CabinetEnsemble
+        return CabinetEnsemble(vcfg, cfg)
     if kind == "det_vlm":
         return DetVLM(vcfg, cfg)
     raise ValueError(f"неизвестный kind={kind!r} у варианта {name}")

@@ -140,14 +140,17 @@ class VLM:
         self.prompt = build_prompt(tax)
         self.key = env(cfg.get("key_env", ""))
         self.max_side = cfg.get("max_side", 1600)
+        self.retries = cfg.get("retries", 5)
+        if not isinstance(self.retries, int) or isinstance(self.retries, bool) or self.retries < 1:
+            raise ValueError(f"retries должен быть целым >= 1, получено {self.retries!r}")
 
     def fingerprint(self) -> str:
         """Меняется при смене модели или таксономии/промпта — кэш по нему понимает, что старые ответы не годятся."""
         text = self.cfg["model"] + self.prompt + build_crop_prompt(self.tax, "")
         return hashlib.sha1(text.encode()).hexdigest()[:10]
 
-    def call(self, jpeg: bytes, prompt: str) -> tuple[str, float]:
-        """-> (текст ответа, стоимость в $; 0, если API её не сообщает)."""
+    def call(self, jpeg: bytes, prompt: str) -> tuple[str, float, int]:
+        """-> (текст ответа, стоимость в $; 0, если API её не сообщает; число HTTP-попыток)."""
         b64 = base64.b64encode(jpeg).decode()
         body = {
             "model": self.cfg["model"],
@@ -162,10 +165,12 @@ class VLM:
         if "openrouter.ai" in self.cfg["base_url"]:
             body["usage"] = {"include": True}
         headers = {"Authorization": f"Bearer {self.key}"} if self.key else {}
-        for attempt in range(5):
+        attempts = 0
+        for attempt in range(self.retries):
+            attempts += 1
             r = requests.post(f"{self.cfg['base_url']}/chat/completions", json=body, headers=headers,
                               timeout=self.cfg.get("timeout", 180))
-            if r.status_code in (429, 500, 502, 503, 504) and attempt < 4:
+            if r.status_code in (429, 500, 502, 503, 504) and attempt < self.retries - 1:
                 time.sleep(5 * 2 ** attempt)
                 continue
             r.raise_for_status()
@@ -173,16 +178,17 @@ class VLM:
             if "error" in data:
                 raise RuntimeError(data["error"])
             cost = float((data.get("usage") or {}).get("cost") or 0)
-            return data["choices"][0]["message"].get("content") or "", cost
+            return data["choices"][0]["message"].get("content") or "", cost, attempts
         raise RuntimeError("retries exhausted")
 
     def _ask(self, jpeg: bytes, prompt: str, extract) -> dict:
         """Запрос с одним повтором при битом JSON."""
-        t0, raw, val, err, cost = time.time(), "", None, None, 0.0
+        t0, raw, val, err, cost, attempts = time.time(), "", None, None, 0.0, 0
         for _ in range(2):
             try:
-                raw, c = self.call(jpeg, prompt)
+                raw, c, a = self.call(jpeg, prompt)
                 cost += c
+                attempts += a
             except Exception as e:  # noqa: BLE001 — любую ошибку API записываем и идём дальше
                 err = str(e)[:300]
                 break
@@ -190,7 +196,7 @@ class VLM:
             if val is not None:
                 break
         return {"value": val, "bad_json": val is None and err is None, "error": err,
-                "seconds": round(time.time() - t0, 2), "cost": cost, "raw": raw[:2000]}
+                "seconds": round(time.time() - t0, 2), "cost": cost, "attempts": attempts, "raw": raw[:2000]}
 
     def predict(self, img: Image.Image) -> dict:
         w, h = img.size

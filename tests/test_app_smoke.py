@@ -83,6 +83,33 @@ class _FakeModelB:
 
 import shutil
 
+class _FakeSingleRoute:
+    """Заглушка единственного маршрута qwen235: первый кадр — поломка, второй — расхождение."""
+
+    workers = 1
+
+    def __init__(self):
+        self.calls = 0
+
+    def predict(self, img):
+        self.calls += 1
+        if self.calls == 1:
+            return {
+                "objects": [{"type": "tksh", "bbox": [4, 4, 56, 56], "status": "bad",
+                             "damage": "mechanical_damage", "description": "Смята дверца ТКШ",
+                             "priority": "high", "review_reasons": []}],
+                "crop_results": [], "review_reasons": [], "seconds": 0.1, "cost": 0.0,
+                "error": None, "bad_json": False,
+            }
+        return {
+            "objects": [{"type": "rsh", "bbox": [4, 4, 56, 56], "status": "review",
+                         "damage": None, "description": "Промты разошлись",
+                         "priority": "none", "review_reasons": ["verdict_disagreement"]}],
+            "crop_results": [], "review_reasons": [], "seconds": 0.1, "cost": 0.0,
+            "error": None, "bad_json": False,
+        }
+
+
 class AppSmokeTests(unittest.TestCase):
     def test_saved_frame_crop_demo_uses_real_results_without_api(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -90,7 +117,6 @@ class AppSmokeTests(unittest.TestCase):
             with patch("vlm.ROOT", root), patch("variants.make", side_effect=AssertionError("live model")):
                 app = AppTest.from_file(str(ROOT / "src" / "app.py"), default_timeout=20).run()
                 self.assertFalse(app.exception)
-                self.assertEqual(app.sidebar.radio[1].value, "Кадр и вырез · Qwen235")
                 next(button for button in app.sidebar.button if button.label == "Открыть готовый пример").click().run()
                 self.assertFalse(app.exception)
                 self.assertTrue(any("Сохранённый результат" in item.value for item in app.info))
@@ -154,14 +180,13 @@ class AppSmokeTests(unittest.TestCase):
             Image.new("RGB", (64, 64), (150, 50, 50)).save(ds_dir / "МП.ТКШ" / "01_bad.jpg")
             Image.new("RGB", (64, 64), (50, 150, 50)).save(ds_dir / "Удовлетворительное состояние РЩ" / "02_ok.jpg")
 
-            fake_b = _FakeModelB()
-            fake_a = _FakeModelA()
+            fake = _FakeSingleRoute()
 
             def fake_make(name, cfg):
-                return fake_a if name == "qwen235" else fake_b
+                return fake
 
             def fake_ready(name, cfg):
-                return (True, "OK") if name in ("qwen235", "gemma31") else (False, "no key")
+                return (True, "OK") if name == "frame_crop_qwen235" else (False, "no key")
 
             out_root = tmp_path / "app_root"
             out_root.mkdir()
@@ -180,7 +205,6 @@ class AppSmokeTests(unittest.TestCase):
                     self.assertEqual(at.sidebar.radio[0].options, ["Папка", "Фотографии", "ZIP-архив"])
 
                     # Вводим путь к локальной папке в сайдбаре и запускаем анализ
-                    at.sidebar.radio[1].set_value("Сверка двух моделей (консенсус)").run()
                     at.sidebar.text_input[0].set_value(str(ds_dir)).run()
                     btn = at.sidebar.button[0]
                     self.assertFalse(btn.disabled)
@@ -193,7 +217,10 @@ class AppSmokeTests(unittest.TestCase):
                     self.assertTrue(any("Фото для дополнительного подтверждения (1)" in s for s in subheaders))
 
                     markdown_text = "\n".join(m.value for m in at.markdown)
-                    self.assertIn("Как разошелось мнение моделей", markdown_text)
+                    self.assertTrue(
+                        "Как разошелось мнение моделей" in markdown_text
+                        or "Почему фото передано на проверку" in markdown_text
+                    )
                     self.assertIn("ТКШ", markdown_text)
 
                     # Проверяем переключение решения оператора на спорном фото -> сразу переносится в поломки

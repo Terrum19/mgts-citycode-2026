@@ -144,6 +144,26 @@ dedup_iou = 0.50
 pad = 0.30
 crop_min_side = 96
 
+# Ансамбль для дата-сета шкафов: один проход детектора, Qwen осматривает каждый вырез
+# двумя разными промтами. Решение принимает consensus.combine_opinions:
+# единогласие подтверждает, расхождение промтов -> review.
+[variants.dss_cabinet_ensemble]
+kind = "cabinet_ensemble"
+model = "weights/grounding-dino-tiny"
+vlm = "qwen235"
+workers = 2
+min_score = 0.22
+text_threshold = 0.20
+min_side = 20
+dedup_iou = 0.50
+pad = 0.30
+crop_min_side = 96
+max_crops = 4
+review_det_score = 0.30
+frame_only = false
+vlm_timeout = 60
+vlm_retries = 2
+
 [variants.det_dino]
 kind = "det_dino"
 encoder = "weights/dinov2-base"

@@ -20,6 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import variants  # noqa: E402
 from consensus import (  # noqa: E402
     CATEGORY_RU,
+    PRIORITY_RU,
+    REASONS_RU,
     TAXONOMY_PROFILES,
     annotate_verdict,
     apply_taxonomy_profile,
@@ -27,6 +29,7 @@ from consensus import (  # noqa: E402
     build_export_tables,
     compare_predictions,
     damage_label,
+    priority_rank,
     status_label,
     summarize_run,
     type_label,
@@ -221,8 +224,10 @@ def _render_object_cards(verdict: dict, names: dict[str, str], show_agreement_no
         st_code = obj.get("status")
         if st_code == "bad":
             dmg_ru = damage_label(obj.get("damage"), names)
+            pr = PRIORITY_RU.get(obj.get("priority", "none"), "")
+            pr_note = f" · {pr}" if pr and pr != "—" else ""
             st.markdown(
-                f"**{idx}. {t_display}** &nbsp; <span class='badge-bad'>Повреждён · {dmg_ru}</span>",
+                f"**{idx}. {t_display}** &nbsp; <span class='badge-bad'>Повреждён · {dmg_ru}{pr_note}</span>",
                 unsafe_allow_html=True,
             )
         elif st_code == "review":
@@ -352,7 +357,6 @@ def main() -> None:
 
     cfg_base = load_config()
     variant_names = list(cfg_base["variants"])
-    default_m1, default_m2 = _pick_default_variants(cfg_base)
 
     # ==================== ЛЕВЫЙ САЙДБАР ====================
     with st.sidebar:
@@ -446,54 +450,14 @@ def main() -> None:
             help="Для шкафов МГТС (ТКШ / РЩ) выберите первый профиль.",
         )
 
-        chosen_mode = "Кадр и вырез · Qwen235"
-        modes = ["Сверка двух моделей (консенсус)", "Одна модель"]
-        if FRAME_CROP in variant_names:
-            modes.insert(0, chosen_mode)
-        mode = st.radio("Режим проверки", modes)
-        frame_crop_mode = mode == chosen_mode
-        dual_mode = mode == "Сверка двух моделей (консенсус)"
-
-        def format_variant(v_name: str) -> str:
-            ok, _ = variant_readiness(v_name, cfg_base)
-            return f"{'✓' if ok else '⚠'} {v_name}"
-
-        if frame_crop_mode:
-            model_a_name = FRAME_CROP
-            st.caption("Grounding DINO находит корпуса. Qwen235 проверяет целое фото и каждый вырез.")
-        else:
-            alternative_names = [name for name in variant_names if name != FRAME_CROP]
-            model_a_name = st.selectbox(
-                "Основная модель (Модель 1)",
-                alternative_names,
-                index=alternative_names.index(default_m1),
-                format_func=format_variant,
-            )
+        # Консенсус всегда считает qwen235: второе мнение даёт второй промт, а не другая модель.
+        model_a_name = FRAME_CROP
+        model_b_name = None
         ok_a, msg_a = variant_readiness(model_a_name, cfg_base)
-        v_a = cfg_base["variants"][model_a_name]
-        st.caption(f"{v_a.get('kind', 'vlm')} · {v_a.get('model') or v_a.get('vlm')} · {msg_a}")
-
-        model_b_name: str | None = None
-        ok_b, msg_b = True, ""
-        if dual_mode:
-            b_choices = [v for v in variant_names if v not in {model_a_name, FRAME_CROP}] or variant_names
-            b_idx = b_choices.index(default_m2) if default_m2 in b_choices else 0
-            model_b_name = st.selectbox(
-                "Модель для сверки (Модель 2)",
-                b_choices,
-                index=b_idx,
-                format_func=format_variant,
-            )
-            ok_b, msg_b = variant_readiness(model_b_name, cfg_base)
-            v_b = cfg_base["variants"][model_b_name]
-            st.caption(f"{v_b.get('kind', 'vlm')} · {v_b.get('model') or v_b.get('vlm')} · {msg_b}")
-
-        if not ok_a and not frame_crop_mode:
-            st.error(f"Модель 1 не готова: {msg_a}")
-        if dual_mode and not ok_b:
-            st.error(f"Модель 2 не готова: {msg_b}")
-
-        can_run = has_dataset_input and ok_a and (not dual_mode or ok_b)
+        st.caption(f"Модель: **qwen235** · кадр и вырез · {msg_a}")
+        if not ok_a:
+            st.error(f"Маршрут не готов: {msg_a}")
+        can_run = has_dataset_input and ok_a
         run_clicked = st.button(
             "🚀 Запустить анализ дата-сета",
             type="primary",
@@ -767,6 +731,9 @@ def main() -> None:
             st.dataframe(reason_df, hide_index=True, width="stretch")
         else:
             st.success("Все фотографии классифицированы без расхождений и ошибок.")
+        if summary.get("priority_counts"):
+            st.caption("Приоритет починки: " + " · ".join(
+                f"{PRIORITY_RU.get(k, k)} — {v}" for k, v in summary["priority_counts"].items()))
 
     # Метрики качества по эталонной разметке (если она была в загруженном датасете)
     if summary["gt_metrics"]:
@@ -866,6 +833,8 @@ def main() -> None:
         return any(o.get("status") == "bad" for o in verdicts[key]["objects"])
 
     bad_items = [it for it in bundle.items if _has_confirmed_bad(it)]
+    bad_items.sort(key=lambda it: (priority_rank(verdicts[it["key"]].get("priority")),
+                                   -sum(o.get("status") == "bad" for o in verdicts[it["key"]]["objects"])))
     review_items = [it for it in bundle.items if _effective_outcome(it["key"], verdicts[it["key"]], overrides) == "review"]
     ok_items = [it for it in bundle.items if _effective_outcome(it["key"], verdicts[it["key"]], overrides) == "ok"]
 
@@ -899,7 +868,8 @@ def main() -> None:
             types_hdr = ", ".join(dict.fromkeys(obj_types)) or "Объект"
             dmgs_hdr = ", ".join(dict.fromkeys(bad_dmgs)) or "Повреждение"
             override_tag = " · подтверждено оператором" if overrides.get(key) == "bad" else ""
-            header = f"🔴 {key} — {types_hdr} · {dmgs_hdr}{override_tag}"
+            pr = PRIORITY_RU.get(v.get("priority", "none"), "—")
+            header = f"🔴 [{pr}] {key} — {types_hdr} · {dmgs_hdr}{override_tag}"
             with st.expander(header, expanded=len(bad_items) <= 3):
                 img_col, info_col = st.columns([3, 2])
                 img_col.image(str(annotated[key]), width="stretch")

@@ -162,6 +162,16 @@ def variant_readiness(name: str, cfg: dict) -> tuple[bool, str]:
         gd_model = ROOT / v["model"]
         if not gd_model.is_dir():
             return False, f"Нет весов Grounding DINO: {v['model']}"
+    if kind == "cabinet_ensemble":
+        gd_model = ROOT / v["model"]
+        if not v.get("frame_only") and not gd_model.is_dir():
+            return False, f"Нет весов Grounding DINO: {v['model']}"
+        vlm_name = v.get("vlm") or (v.get("vlms") or [None])[0]
+        if vlm_name in cfg["variants"]:
+            key_env = cfg["variants"][vlm_name].get("key_env", "")
+            if key_env and not env(key_env):
+                return False, f"Не задан {key_env} в .env / окружении"
+        return True, "Готов к запуску"
     if kind in ("det_dino", "boxes_dino", "photo_dino"):
         ckpt = ROOT / v["checkpoint"]
         if not ckpt.is_file():
@@ -203,6 +213,186 @@ def damage_label(code: str | None, names: dict[str, str]) -> str:
 
 def status_label(status: str | None) -> str:
     return STATUS_RU.get(status or "", str(status or "—"))
+
+
+REASONS_RU: dict[str, str] = {
+    "type_disagreement": "Модели не согласовали тип объекта",
+    "verdict_disagreement": "Модели не согласовали состояние или вид повреждения",
+    "model_uncertain": "Модели запросили дополнительную проверку",
+    "model_error": "Ошибка API хотя бы одной модели",
+    "invalid_response": "Невалидный ответ хотя бы одной модели",
+    "low_detector_score": "Низкая уверенность детектора",
+    "no_detections": "Детектор не нашёл ТКШ или РЩ",
+    "no_confirmed_target": "Модели не подтвердили целевой объект",
+    "crop_limit": "Лимит вырезов исчерпан: часть находок не проверена",
+    "detector_error": "Ошибка локального детектора",
+}
+
+_TARGET_TYPES = {"tksh", "rsh", "cabinet"}
+_VERDICTS = {"mechanical", "paint", "ok", "review", "not_target"}
+_VERDICT_DAMAGE = {"mechanical": "mechanical_damage", "paint": "coating_corrosion"}
+
+
+def cabinet_type(value: str | None) -> str | None:
+    """Нормализовать тип шкафа; всё, что не ТКШ/РЩ/шкаф, не считается целевым типом."""
+    if not value:
+        return None
+    normalized = norm_type(value)
+    return normalized if normalized in _TARGET_TYPES else None
+
+
+def _opinion_answer(opinion: dict) -> dict:
+    answer = opinion.get("answer")
+    return answer if isinstance(answer, dict) else {}
+
+
+def opinion_is_valid(opinion: dict) -> bool:
+    """Валидный ответ: без ошибки API, без битого JSON и с допустимым вердиктом."""
+    answer = _opinion_answer(opinion)
+    return (
+        not opinion.get("error")
+        and not opinion.get("bad_json")
+        and isinstance(answer.get("verdict"), str)
+        and answer["verdict"] in _VERDICTS
+    )
+
+
+def combine_opinions(opinions: list[dict], det_score: float | None,
+                     review_det_score: float = 0.30) -> dict:
+    """Согласовать мнения моделей по одному вырезу.
+
+    Единогласие подтверждает статус; любое расхождение, ошибка, битый JSON, неуверенность
+    или низкая уверенность детектора отправляют вырез на ручную проверку.
+    """
+    total = len(opinions)
+    reasons: list[str] = []
+
+    def add(code: str) -> None:
+        if code not in reasons:
+            reasons.append(code)
+
+    valid = [op for op in opinions if opinion_is_valid(op)]
+    valid_count = len(valid)
+
+    if total < 2 or any(op.get("error") for op in opinions):
+        add("model_error")
+    if any(op.get("bad_json") for op in opinions):
+        add("invalid_response")
+    if valid_count == 0 and not any(op.get("error") or op.get("bad_json") for op in opinions):
+        add("invalid_response")
+    if any(_opinion_answer(op).get("verdict") == "review" for op in valid):
+        add("model_uncertain")
+    if det_score is not None and det_score < review_det_score:
+        add("low_detector_score")
+
+    types = [cabinet_type(_opinion_answer(op).get("type")) for op in valid]
+    known_types = [t for t in types if t is not None]
+    verdicts = [_opinion_answer(op).get("verdict") for op in valid]
+
+    type_conflict = len(set(known_types)) > 1
+    verdict_conflict = len(set(verdicts)) > 1
+    if type_conflict:
+        add("type_disagreement")
+    if verdict_conflict:
+        add("verdict_disagreement")
+
+    type_agreement = valid_count == total and not type_conflict
+    verdict_agreement = valid_count == total and not verdict_conflict
+    pairs = {(cabinet_type(_opinion_answer(op).get("type")), _opinion_answer(op).get("verdict"))
+             for op in valid}
+    full_agreement = (
+        valid_count == total
+        and not type_conflict
+        and not verdict_conflict
+        and len(pairs) == 1
+        and not any(op.get("error") or op.get("bad_json") for op in opinions)
+    )
+
+    unanimous_verdict = verdicts[0] if valid_count == total and not verdict_conflict else None
+    unanimous_type = known_types[0] if known_types and not type_conflict else None
+
+    status, damage = "review", None
+    if not reasons and unanimous_verdict in _VERDICT_DAMAGE:
+        status, damage = "bad", _VERDICT_DAMAGE[unanimous_verdict]
+    elif not reasons and unanimous_verdict == "ok":
+        status = "ok"
+    elif not reasons and unanimous_verdict == "not_target":
+        status = "not_target"
+
+    type_out = unanimous_type or next((t for t in known_types if t), None)
+    if status != "not_target" and type_out is None:
+        type_out = "cabinet"
+
+    parts = []
+    for opinion in opinions:
+        evidence = str(_opinion_answer(opinion).get("evidence") or "").strip()
+        if evidence:
+            name = opinion.get("variant") or opinion.get("model") or "модель"
+            parts.append(f"{name}: {evidence}")
+
+    return {
+        "type": None if status == "not_target" else type_out,
+        "status": status,
+        "damage": damage,
+        "description": " | ".join(parts),
+        "review_reasons": reasons,
+        "type_agreement": type_agreement,
+        "verdict_agreement": verdict_agreement,
+        "full_agreement": full_agreement,
+        "valid_opinions": valid_count,
+        "total_opinions": total,
+    }
+
+
+PRIORITY_ORDER = {"emergency": 0, "high": 1, "medium": 2, "low": 3, "none": 9}
+PRIORITY_RU = {
+    "emergency": "Аварийная",
+    "high": "Высокая",
+    "medium": "Средняя",
+    "low": "Низкая",
+    "none": "—",
+}
+# Аварийные: наклон/срыв корпуса, открытая или отсутствующая дверца, открытые кабели.
+EMERGENCY_DAMAGE = {
+    "cabinet_tilted", "equipment_open", "equipment_fallen",
+    "cover_missing", "cover_broken", "cover_open_or_shifted",
+    "cables_exposed", "cables_damaged",
+}
+# Высокие: разрушение корпуса и крепления, провал покрытия вокруг колодца.
+HIGH_DAMAGE = {
+    "cabinet_damaged", "mechanical_damage", "pole_damaged", "pole_tilted",
+    "ring_or_surface_damaged",
+}
+# Низкие: косметика. Граффити и надписи в таксономии отдельным кодом не идут,
+# поэтому ловим их по описанию модели.
+LOW_DAMAGE = {"cable_coil_unwound"}
+LOW_KEYWORDS = ("граффити", "надпис", "рисун", "наклейк", "скотч", "маркер")
+
+
+def defect_priority(damage: str | None, description: str = "", status: str = "bad") -> str:
+    """Приоритет починки: аварийная / высокая / средняя / низкая.
+
+    Аварийные признаки важнее косметики: если на шкафу и граффити, и наклон, приоритет аварийный.
+    """
+    if status != "bad":
+        return "none"
+    code = norm_damage(damage)
+    if code in EMERGENCY_DAMAGE:
+        return "emergency"
+    text = (description or "").casefold()
+    if any(word in text for word in LOW_KEYWORDS):
+        return "low"
+    if code in HIGH_DAMAGE:
+        return "high"
+    if code in LOW_DAMAGE:
+        return "low"
+    if code == "coating_corrosion":
+        return "medium"
+    return "medium" if code else "low"
+
+
+def priority_rank(value: str | None) -> int:
+    return PRIORITY_ORDER.get(value or "none", PRIORITY_ORDER["none"])
 
 
 def _center_dist_ratio(a: list[float], b: list[float]) -> float:
@@ -322,6 +512,9 @@ def compare_predictions(
                 parts = [f"{op['model']} → «{op['label']}»" for op in sub_ops if op.get("label")]
                 add_reason("status", "Разошлись внутренние модели: " + "; ".join(parts))
 
+        for code in pred_a.get("review_reasons") or []:
+            add_reason("error" if code in ("detector_error", "model_error", "invalid_response") else "uncertain",
+                       REASONS_RU.get(code, code))
         for crop in pred_a.get("crop_results") or []:
             if "primary_proposal_id" in pred_a and crop.get("proposal_id") != pred_a["primary_proposal_id"]:
                 continue
@@ -329,12 +522,16 @@ def compare_predictions(
                 add_reason("error", f"Ошибка VLM на вырезе #{crop.get('proposal_id')}: {crop['error']}")
             elif crop.get("bad_json"):
                 add_reason("error", f"Некорректный ответ VLM на вырезе #{crop.get('proposal_id')}")
+            for code in (crop.get("consensus") or {}).get("review_reasons") or []:
+                add_reason("uncertain", REASONS_RU.get(code, code))
 
         for idx, oa in enumerate(objs_a, 1):
             st = oa.get("status") or "ok"
             obj_diffs: list[str] = []
             if st == "review":
-                msg = oa.get("description") or f"Объект #{idx} ({type_label(oa.get('type'), names)}): требуется ручная проверка"
+                codes = oa.get("review_reasons") or []
+                msg = (" · ".join(REASONS_RU.get(c, c) for c in codes) if codes else
+                       oa.get("description") or f"Объект #{idx} ({type_label(oa.get('type'), names)}): требуется ручная проверка")
                 add_reason("uncertain", msg)
                 obj_diffs.append(msg)
                 if oa.get("top_classes"):
@@ -354,6 +551,7 @@ def compare_predictions(
                 "agreed": not obj_diffs and "status" not in categories,
                 "disagreements": obj_diffs,
                 "source": model_a_name,
+                "priority": defect_priority(oa.get("damage"), oa.get("description") or "", st),
             })
     else:
         objs_b = pred_b.get("objects") or []
@@ -416,6 +614,7 @@ def compare_predictions(
                 "agreed": agreed_pair,
                 "disagreements": pair_diffs,
                 "source": f"{model_a_name} + {model_b_name}",
+                "priority": defect_priority(merged_damage or cand_damage, combined_desc, merged_status),
             })
 
         for i in unmatched_a:
@@ -439,6 +638,7 @@ def compare_predictions(
                 "agreed": False,
                 "disagreements": [msg],
                 "source": model_a_name,
+                "priority": defect_priority(oa.get("damage"), oa.get("description") or "", "review"),
             })
 
         for j in unmatched_b:
@@ -462,6 +662,7 @@ def compare_predictions(
                 "agreed": False,
                 "disagreements": [msg],
                 "source": model_b_name,
+                "priority": defect_priority(ob.get("damage"), ob.get("description") or "", "review"),
             })
 
     if reasons or any(o["status"] == "review" for o in merged_objects):
@@ -472,6 +673,9 @@ def compare_predictions(
         outcome = "ok"
 
     agreed = outcome != "review"
+    ranked = [o["priority"] for o in merged_objects
+              if o.get("priority") in PRIORITY_ORDER and o["priority"] != "none"]
+    verdict_priority = min(ranked, key=priority_rank) if ranked else "none"
     seconds = float(pred_a.get("seconds") or 0.0) + float((pred_b or {}).get("seconds") or 0.0)
     cost = float(pred_a.get("cost") or 0.0) + float((pred_b or {}).get("cost") or 0.0)
 
@@ -480,6 +684,7 @@ def compare_predictions(
         "agreed": agreed,
         "disagreement_reasons": reasons,
         "disagreement_categories": categories,
+        "priority": verdict_priority,
         "objects": merged_objects,
         "model_a": _pred_summary(pred_a, model_a_name, names),
         "model_b": _pred_summary(pred_b, model_b_name, names) if (pred_b is not None and model_b_name) else None,
@@ -664,12 +869,14 @@ def summarize_run(
     ok_objects = 0
     review_objects = 0
     defect_photos = 0  # фото хотя бы с одним подтверждённым повреждённым объектом
+    priority_counts = Counter()
 
     for it in items:
         key = it["key"]
         v = verdicts_by_key[key]
         eff_outcome = overrides.get(key, v["outcome"])
         outcome_counts[eff_outcome] += 1
+        priority_counts[v.get("priority", "none")] += 1
         if eff_outcome == "bad" or any(o.get("status") == "bad" for o in v["objects"]):
             defect_photos += 1
         if v["agreed"]:
@@ -707,6 +914,7 @@ def summarize_run(
         "agreed_photos": agreed_count,
         "agreement_rate": (agreed_count / n) if (n and model_b_name) else None,
         "type_counts": dict(type_counts.most_common()),
+        "priority_counts": {k: priority_counts[k] for k in PRIORITY_ORDER if priority_counts[k]},
         "damage_counts": dict(damage_counts.most_common()),
         "disagreement_reason_counts": dict(reason_counts.most_common()),
         "total_seconds": round(total_seconds, 2),
@@ -771,6 +979,8 @@ def build_export_tables(
             "model_b": mb.get("name", "") if mb else "",
             "model_b_status": mb.get("status", "") if mb else "",
             "gt_label": it.get("gt_label") or "",
+            "priority": v.get("priority", "none"),
+            "priority_ru": PRIORITY_RU.get(v.get("priority", "none"), ""),
             "seconds": v["seconds"],
             "cost": v["cost"],
             **meta,
@@ -803,6 +1013,8 @@ def build_export_tables(
                 "bbox": " ".join(map(str, obj["bbox"])) if obj.get("bbox") else "",
                 "disagreement_reasons": "; ".join(obj.get("disagreements") or v["disagreement_reasons"]),
                 "gt_label": it.get("gt_label") or "",
+                "priority": obj.get("priority", "none"),
+                "priority_ru": PRIORITY_RU.get(obj.get("priority", "none"), ""),
                 **meta,
             }
             objects_rows.append(row)
