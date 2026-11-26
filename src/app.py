@@ -38,6 +38,7 @@ from dataset_io import (  # noqa: E402
     ingest_zip_archive,
     inspect_dataset,
 )
+from asset import enrich_result, load_registry  # noqa: E402
 from predict import IMG_EXT, write_csv  # noqa: E402
 from run import load_config  # noqa: E402
 from vlm import ROOT  # noqa: E402
@@ -327,6 +328,10 @@ def main() -> None:
                 "Готовые рамки (boxes.json)",
                 type=["json"],
             )
+            registry_file = st.file_uploader(
+                "Реестр объектов: asset_id, адрес, координаты (CSV/XLSX/JSONL)",
+                type=["csv", "xlsx", "xls", "jsonl"],
+            )
 
         has_dataset_input = bool(
             (upload_mode == "Фотографии" and uploaded_photos)
@@ -347,6 +352,15 @@ def main() -> None:
                 st.warning("Указанная локальная папка не найдена")
         elif upload_mode == "ZIP-архив" and uploaded_zip:
             st.caption(f"Архив: **{uploaded_zip.name}** ({uploaded_zip.size / 1024:.0f} КБ)")
+
+        photo_limit = st.number_input(
+            "Максимум фото за прогон",
+            min_value=1,
+            max_value=500,
+            value=24,
+            step=1,
+            help="Ограничение стоимости и времени: в обработку попадут первые N фото в алфавитном порядке.",
+        )
 
         st.divider()
         st.header("🤖 Модели и режим")
@@ -444,7 +458,21 @@ def main() -> None:
                 boxes_path = out / "extra_boxes.json"
                 boxes_path.write_bytes(extra_boxes_file.getbuffer())
 
+            registry = None
+            if registry_file is not None:
+                reg_path = out / ("registry" + Path(registry_file.name).suffix)
+                reg_path.write_bytes(registry_file.getbuffer())
+                try:
+                    registry = load_registry(read_meta(reg_path))
+                    st.caption(f"Реестр: {len(registry)} объектов")
+                except ValueError as exc:
+                    st.error(f"Реестр отклонён: {exc}")
             bundle = inspect_dataset(ds_root, extra_meta_file=meta_path, extra_boxes_file=boxes_path)
+            if len(bundle.items) > photo_limit:
+                bundle.warnings.append(
+                    f"Ограничение прогона: обработано {photo_limit} из {len(bundle.items)} фото."
+                )
+                bundle.items = bundle.items[:photo_limit]
             for w in bundle.warnings:
                 st.warning(w)
 
@@ -494,6 +522,7 @@ def main() -> None:
                     item = futures[fut]
                     key, rgb, pred_a, pred_b = fut.result()
                     verdict = compare_predictions(pred_a, pred_b, model_a_name, model_b_name, names)
+                    verdict = enrich_result(verdict, meta=bundle.meta_by_key.get(key, {}), registry=registry)
                     verdicts_by_key[key] = verdict
                     raw_preds[key] = {"model_a": pred_a, "model_b": pred_b, "verdict": verdict}
 
@@ -503,11 +532,12 @@ def main() -> None:
                     ann_img.save(ann_target, quality=88)
                     annotated_paths[key] = ann_target
 
-                    if verdict["outcome"] == "bad":
+                    has_bad = any(o.get("status") == "bad" for o in verdict["objects"])
+                    if has_bad:
                         done_bad += 1
-                    elif verdict["outcome"] == "review":
+                    if verdict["outcome"] == "review":
                         done_review += 1
-                    else:
+                    elif not has_bad:
                         done_ok += 1
 
                     frac = 0.05 + 0.95 * (done_idx / total)
@@ -526,6 +556,20 @@ def main() -> None:
 
             # Сохранение результатов на диск
             tables = build_export_tables(bundle.items, verdicts_by_key, names)
+            tables["passport"] = [
+                {"file": k,
+                 "asset_id": (v.get("asset") or {}).get("asset_id") or "",
+                 "identity": (v.get("asset") or {}).get("identity_status", ""),
+                 "registry": (v.get("asset") or {}).get("registry_status", ""),
+                 "address": (v.get("asset") or {}).get("address") or "",
+                 "lat": (v.get("asset") or {}).get("lat"),
+                 "lon": (v.get("asset") or {}).get("lon"),
+                 "effect": (v.get("assessment") or {}).get("effect", ""),
+                 "recommendation": (v.get("assessment") or {}).get("recommendation", ""),
+                 "urgency": (v.get("assessment") or {}).get("urgency", ""),
+                 "scope": v.get("scope", "")}
+                for k, v in verdicts_by_key.items()
+            ]
             for t_name, t_rows in tables.items():
                 write_csv(out / f"{t_name}.csv", t_rows)
             (out / "preds.json").write_text(json.dumps(raw_preds, ensure_ascii=False, indent=1, default=str))
@@ -574,12 +618,13 @@ def main() -> None:
         f"Профиль: **{res['profile_title']}** · Модель 1: `{model_a_name}`"
         + (f" · Модель 2: `{model_b_name}`" if model_b_name else " · Одиночный режим")
         + f" · Время прогона: {res['elapsed']} с"
+        + f" · Стоимость по API: ${summary['total_cost']:.3f}"
     )
 
     k1, k2, k3, k4, k5, k6 = st.columns(6)
     k1.metric("Всего фото", summary["total_photos"], help=f"Ошибок API/JSON: {summary['error_photos']}")
     k2.metric("Найдено объектов", summary["total_objects"], help="Общее количество обнаруженных шкафов/объектов")
-    k3.metric("Выявлено поломок (фото)", summary["confirmed_bad_photos"], delta=f"{summary['bad_objects']} объект(ов)", delta_color="inverse")
+    k3.metric("Фото с поломкой", summary["defect_photos"], delta=f"{summary['bad_objects']} объект(ов)", delta_color="inverse")
     pct_review = (summary["review_photos"] * 100 / summary["total_photos"]) if summary["total_photos"] else 0
     k4.metric("На доп. подтверждение", summary["review_photos"], delta=f"{pct_review:.0f}% фото", delta_color="off")
     k5.metric("Исправно (фото)", summary["confirmed_ok_photos"])
@@ -587,6 +632,10 @@ def main() -> None:
         k6.metric("Согласие моделей", f"{summary['agreement_rate']:.0%}", delta=f"{summary['avg_seconds']:.1f} с/фото", delta_color="off")
     else:
         k6.metric("Среднее время", f"{summary['avg_seconds']:.1f} с/фото", delta=f"${summary['total_cost']:.3f}" if summary["total_cost"] else None)
+    st.caption(
+        "Фото с подтверждённой поломкой и фото на проверку считаются отдельно: кадр попадает в оба списка, "
+        "если на нём есть и подтверждённый дефект, и спорный объект."
+    )
 
     # Аналитика: типы объектов, виды поломок и причины расхождения
     col_left, col_right = st.columns(2)
@@ -708,7 +757,14 @@ def main() -> None:
     st.divider()
 
     # ==================== СПИСОК 1: УСПЕШНО КЛАССИФИЦИРОВАННЫЕ ПОЛОМКИ ====================
-    bad_items = [it for it in bundle.items if _effective_outcome(it["key"], verdicts[it["key"]], overrides) == "bad"]
+
+    def _has_confirmed_bad(item: dict) -> bool:
+        key = item["key"]
+        if _effective_outcome(key, verdicts[key], overrides) == "bad":
+            return True
+        return any(o.get("status") == "bad" for o in verdicts[key]["objects"])
+
+    bad_items = [it for it in bundle.items if _has_confirmed_bad(it)]
     review_items = [it for it in bundle.items if _effective_outcome(it["key"], verdicts[it["key"]], overrides) == "review"]
     ok_items = [it for it in bundle.items if _effective_outcome(it["key"], verdicts[it["key"]], overrides) == "ok"]
 
@@ -773,24 +829,24 @@ def main() -> None:
                     _render_item_meta(it)
                     st.markdown("#### Классификация и описания объектов")
                     _render_object_cards(v, names, show_agreement_note=False)
-                    st.divider()
-                    _render_disagreement_section(v, names)
-                    st.divider()
-                    prev = overrides.get(key, "review")
-                    choice = st.radio(
-                        "Решение оператора",
-                        ["Оставить на проверке", "Подтвердить поломку", "Признать исправным"],
-                        index={"review": 0, "bad": 1, "ok": 2}[prev],
-                        key=f"op_decision_{key}",
-                        horizontal=True,
-                    )
-                    mapped = {"Оставить на проверке": "review", "Подтвердить поломку": "bad", "Признать исправным": "ok"}[choice]
-                    if mapped != prev:
-                        if mapped == "review":
-                            overrides.pop(key, None)
-                        else:
-                            overrides[key] = mapped
-                        st.rerun()
+                st.divider()
+                _render_disagreement_section(v, names)
+                st.divider()
+                prev = overrides.get(key, "review")
+                choice = st.radio(
+                    "Решение оператора",
+                    ["Оставить на проверке", "Подтвердить поломку", "Признать исправным"],
+                    index={"review": 0, "bad": 1, "ok": 2}[prev],
+                    key=f"op_decision_{key}",
+                    horizontal=True,
+                )
+                mapped = {"Оставить на проверке": "review", "Подтвердить поломку": "bad", "Признать исправным": "ok"}[choice]
+                if mapped != prev:
+                    if mapped == "review":
+                        overrides.pop(key, None)
+                    else:
+                        overrides[key] = mapped
+                    st.rerun()
 
     # ==================== СПИСОК 3: ИСПРАВНЫЕ ОБЪЕКТЫ ====================
     st.subheader(f"🟢 Успешно классифицированные: исправные объекты ({len(ok_items)})")

@@ -661,12 +661,15 @@ def summarize_run(
     bad_objects = 0
     ok_objects = 0
     review_objects = 0
+    defect_photos = 0  # фото хотя бы с одним подтверждённым повреждённым объектом
 
     for it in items:
         key = it["key"]
         v = verdicts_by_key[key]
         eff_outcome = overrides.get(key, v["outcome"])
         outcome_counts[eff_outcome] += 1
+        if eff_outcome == "bad" or any(o.get("status") == "bad" for o in v["objects"]):
+            defect_photos += 1
         if v["agreed"]:
             agreed_count += 1
         if "error" in v["disagreement_categories"]:
@@ -691,6 +694,7 @@ def summarize_run(
     summary = {
         "total_photos": n,
         "confirmed_bad_photos": outcome_counts["bad"],
+        "defect_photos": defect_photos,
         "confirmed_ok_photos": outcome_counts["ok"],
         "review_photos": outcome_counts["review"],
         "error_photos": error_photos,
