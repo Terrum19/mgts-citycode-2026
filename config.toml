@@ -129,6 +129,21 @@ dedup_iou = 0.50
 pad = 0.30
 crop_min_side = 96
 
+[variants.frame_crop_qwen235]
+kind = "frame_crop_qwen"
+model = "weights/grounding-dino-tiny"
+encoder = "weights/dinov2-base"
+crop_head = "configs/dino_crop_dss.joblib"
+frame_prompt = "configs/qwen235_frame_prompt.txt"
+vlm = "qwen235"
+workers = 2
+min_score = 0.22
+text_threshold = 0.20
+min_side = 20
+dedup_iou = 0.50
+pad = 0.30
+crop_min_side = 96
+
 [variants.det_dino]
 kind = "det_dino"
 encoder = "weights/dinov2-base"

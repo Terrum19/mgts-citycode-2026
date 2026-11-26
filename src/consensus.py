@@ -158,7 +158,7 @@ def variant_readiness(name: str, cfg: dict) -> tuple[bool, str]:
             det_model = ROOT / det_model
         if not det_model.is_dir():
             return False, f"Нет весов детектора: {cfg['detector']['model']}"
-    if kind == "grounding_qwen":
+    if kind in ("grounding_qwen", "frame_crop_qwen"):
         gd_model = ROOT / v["model"]
         if not gd_model.is_dir():
             return False, f"Нет весов Grounding DINO: {v['model']}"
@@ -323,6 +323,8 @@ def compare_predictions(
                 add_reason("status", "Разошлись внутренние модели: " + "; ".join(parts))
 
         for crop in pred_a.get("crop_results") or []:
+            if "primary_proposal_id" in pred_a and crop.get("proposal_id") != pred_a["primary_proposal_id"]:
+                continue
             if crop.get("error"):
                 add_reason("error", f"Ошибка VLM на вырезе #{crop.get('proposal_id')}: {crop['error']}")
             elif crop.get("bad_json"):

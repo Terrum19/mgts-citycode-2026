@@ -34,6 +34,8 @@ class AssessFrameTest(unittest.TestCase):
             ({"status": "ok"}, "", "not_assessed", "routine"),
             ({"status": "bad", "damage": "Неудовлетворительное состояние ЛКП"}, "", "coating", "planned"),
             ({"status": "bad", "damage": "МП"}, "", "envelope_or_mounting", "unscheduled"),
+            ({"status": "bad", "damage": "coating_corrosion"}, "", "coating", "planned"),
+            ({"status": "bad", "damage": "mechanical_damage"}, "", "envelope_or_mounting", "unscheduled"),
             ({"status": "bad", "damage": "МП"}, "ТКШ удерживается на питающем кабеле", "mounting", "emergency"),
             ({"status": "bad", "damage": "МП"}, "Нарушение степени защиты оболочки РЩ", "envelope", "unscheduled"),
             ({"status": "review"}, "герметичность", "unknown", "manual_review"),

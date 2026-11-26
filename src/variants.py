@@ -90,6 +90,9 @@ def make(name: str, cfg: dict):
     if kind == "grounding_qwen":
         from grounding_qwen import GroundingQwen
         return GroundingQwen(vcfg, cfg)
+    if kind == "frame_crop_qwen":
+        from frame_crop_qwen import FrameCropQwen
+        return FrameCropQwen(vcfg, cfg)
     if kind == "det_vlm":
         return DetVLM(vcfg, cfg)
     raise ValueError(f"неизвестный kind={kind!r} у варианта {name}")

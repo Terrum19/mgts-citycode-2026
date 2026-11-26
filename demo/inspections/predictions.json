@@ -1,0 +1,376 @@
+[
+  {
+    "filename": "29159065.jpg",
+    "source_sha256_prefix": "b300d87fe62c",
+    "prediction": {
+      "objects": [
+        {
+          "type": "rsh",
+          "bbox": [
+            162,
+            11,
+            777,
+            775
+          ],
+          "status": "bad",
+          "damage": "coating_corrosion",
+          "description": "сильная коррозия и отслоение краски по всему корпусу, особенно в нижней части и по краям",
+          "det_score": 0.5915,
+          "proposal_id": 1
+        }
+      ],
+      "detections": [
+        {
+          "bbox": [
+            162,
+            11,
+            777,
+            775
+          ],
+          "score": 0.5915,
+          "type": "rsh"
+        },
+        {
+          "bbox": [
+            210,
+            751,
+            620,
+            1095
+          ],
+          "score": 0.2566,
+          "type": "rsh"
+        }
+      ],
+      "crop_results": [
+        {
+          "proposal_id": 1,
+          "bbox": [
+            162,
+            11,
+            777,
+            775
+          ],
+          "crop_bbox": [
+            0,
+            0,
+            826,
+            1004
+          ],
+          "answer": {
+            "type": "rsh",
+            "verdict": "paint",
+            "evidence": "сильная коррозия и отслоение краски по всему корпусу, особенно в нижней части и по краям"
+          },
+          "target_box": [
+            196,
+            11,
+            941,
+            772
+          ],
+          "bad_json": false,
+          "error": null
+        },
+        {
+          "proposal_id": 2,
+          "bbox": [
+            210,
+            751,
+            620,
+            1095
+          ],
+          "crop_bbox": [
+            88,
+            648,
+            743,
+            1100
+          ],
+          "answer": {
+            "type": "rsh",
+            "verdict": "paint",
+            "evidence": "на верхней части корпуса видна коррозия и отслоение краски, особенно в левом верхнем углу и вдоль края"
+          },
+          "target_box": [
+            187,
+            228,
+            813,
+            989
+          ],
+          "bad_json": false,
+          "error": null
+        }
+      ],
+      "dinov2": {
+        "available": true,
+        "objects": [
+          {
+            "proposal_id": 1,
+            "bbox": [
+              162,
+              11,
+              777,
+              775
+            ],
+            "class": "rs_mech"
+          },
+          {
+            "proposal_id": 2,
+            "bbox": [
+              210,
+              751,
+              620,
+              1095
+            ],
+            "class": "rs_mech"
+          }
+        ]
+      },
+      "frame_class": "rs_paint",
+      "crop_class": "rs_paint",
+      "frame_description": "Распределительный щит с явным повреждением лакокрасочного покрытия — видна коррозия и осыпавшаяся краска по краям и на поверхности дверцы, без признаков механической деформации корпуса.",
+      "crop_description": "сильная коррозия и отслоение краски по всему корпусу, особенно в нижней части и по краям",
+      "review_reason": "",
+      "primary_proposal_id": 1,
+      "cost": 0.00194197,
+      "seconds": 43.050323577999734,
+      "det_seconds": 25.682702697000423,
+      "consensus_class": "rs_paint",
+      "error": null,
+      "bad_json": false
+    }
+  },
+  {
+    "filename": "35453689.jpg",
+    "source_sha256_prefix": "a5e3ea3b066f",
+    "prediction": {
+      "objects": [
+        {
+          "type": "rsh",
+          "bbox": [
+            5,
+            4,
+            368,
+            994
+          ],
+          "status": "review",
+          "damage": null,
+          "description": "Оценки состояния по целому фото и основной рамке расходятся.",
+          "det_score": 0.3894,
+          "proposal_id": 1
+        }
+      ],
+      "detections": [
+        {
+          "bbox": [
+            5,
+            4,
+            368,
+            994
+          ],
+          "score": 0.3894,
+          "type": "tksh"
+        },
+        {
+          "bbox": [
+            322,
+            304,
+            448,
+            391
+          ],
+          "score": 0.3098,
+          "type": "tksh"
+        },
+        {
+          "bbox": [
+            69,
+            270,
+            345,
+            713
+          ],
+          "score": 0.248,
+          "type": "tksh"
+        },
+        {
+          "bbox": [
+            3,
+            585,
+            199,
+            997
+          ],
+          "score": 0.2444,
+          "type": "tksh"
+        }
+      ],
+      "crop_results": [
+        {
+          "proposal_id": 1,
+          "bbox": [
+            5,
+            4,
+            368,
+            994
+          ],
+          "crop_bbox": [
+            0,
+            0,
+            450,
+            1000
+          ],
+          "answer": {
+            "type": "rsh",
+            "verdict": "paint",
+            "evidence": "на боковой поверхности корпуса видны следы отслоения краски и коррозии в нижней части"
+          },
+          "target_box": [
+            11,
+            4,
+            818,
+            994
+          ],
+          "bad_json": false,
+          "error": null
+        },
+        {
+          "proposal_id": 2,
+          "bbox": [
+            322,
+            304,
+            448,
+            391
+          ],
+          "crop_bbox": [
+            284,
+            278,
+            450,
+            417
+          ],
+          "answer": {
+            "type": "tksh",
+            "verdict": "ok",
+            "evidence": "видимая часть корпуса гладкая, без явных повреждений или отслоения краски, типична для ТКШ"
+          },
+          "target_box": [
+            229,
+            187,
+            988,
+            813
+          ],
+          "bad_json": false,
+          "error": null
+        },
+        {
+          "proposal_id": 3,
+          "bbox": [
+            69,
+            270,
+            345,
+            713
+          ],
+          "crop_bbox": [
+            0,
+            137,
+            428,
+            846
+          ],
+          "answer": {
+            "type": "rsh",
+            "verdict": "mechanical",
+            "evidence": "дверца щита открыта и смещена, виден зазор и деформация крепления по краю"
+          },
+          "target_box": [
+            161,
+            188,
+            806,
+            812
+          ],
+          "bad_json": false,
+          "error": null
+        },
+        {
+          "proposal_id": 4,
+          "bbox": [
+            3,
+            585,
+            199,
+            997
+          ],
+          "crop_bbox": [
+            0,
+            461,
+            258,
+            1000
+          ],
+          "answer": {
+            "type": "tksh",
+            "verdict": "paint",
+            "evidence": "на левой боковой панели видна коррозия и отслоение краски в нижней части корпуса"
+          },
+          "target_box": [
+            12,
+            230,
+            771,
+            994
+          ],
+          "bad_json": false,
+          "error": null
+        }
+      ],
+      "dinov2": {
+        "available": true,
+        "objects": [
+          {
+            "proposal_id": 1,
+            "bbox": [
+              5,
+              4,
+              368,
+              994
+            ],
+            "class": "rs_paint"
+          },
+          {
+            "proposal_id": 2,
+            "bbox": [
+              322,
+              304,
+              448,
+              391
+            ],
+            "class": "tk_mech"
+          },
+          {
+            "proposal_id": 3,
+            "bbox": [
+              69,
+              270,
+              345,
+              713
+            ],
+            "class": "rs_paint"
+          },
+          {
+            "proposal_id": 4,
+            "bbox": [
+              3,
+              585,
+              199,
+              997
+            ],
+            "class": "rs_paint"
+          }
+        ]
+      },
+      "frame_class": "rs_mech",
+      "crop_class": "rs_paint",
+      "frame_description": "На фото — распределительный щит с повреждённой дверцей: видна вмятина и деформация металла в верхней части двери, что указывает на механическое повреждение корпуса.",
+      "crop_description": "на боковой поверхности корпуса видны следы отслоения краски и коррозии в нижней части",
+      "review_reason": "Оценки состояния по целому фото и основной рамке расходятся.",
+      "primary_proposal_id": 1,
+      "cost": 0.00155236,
+      "seconds": 59.72720806399957,
+      "det_seconds": 24.504888208999546,
+      "consensus_class": "review",
+      "error": null,
+      "bad_json": false
+    }
+  }
+]

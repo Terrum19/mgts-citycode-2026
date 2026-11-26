@@ -8,6 +8,7 @@ import io
 import json
 import sys
 import time
+from tempfile import mkdtemp
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from consensus import (  # noqa: E402
     variant_readiness,
 )
 from dataset_io import (  # noqa: E402
+    DatasetBundle,
     ingest_local_directory,
     ingest_uploaded_directory,
     ingest_uploaded_photos,
@@ -39,7 +41,7 @@ from dataset_io import (  # noqa: E402
     inspect_dataset,
 )
 from asset import enrich_result, load_registry  # noqa: E402
-from predict import IMG_EXT, write_csv  # noqa: E402
+from predict import IMG_EXT, read_meta, write_csv  # noqa: E402
 from run import load_config  # noqa: E402
 from vlm import ROOT  # noqa: E402
 
@@ -91,8 +93,8 @@ def _model_for_session(slot: str, name: str, config: dict):
 
 
 def _pick_default_variants(cfg: dict) -> tuple[str, str]:
-    ready = [k for k in cfg["variants"] if variant_readiness(k, cfg)[0]]
-    all_names = list(cfg["variants"])
+    ready = [k for k in cfg["variants"] if k != FRAME_CROP and variant_readiness(k, cfg)[0]]
+    all_names = [name for name in cfg["variants"] if name != FRAME_CROP]
     m1 = "qwen235" if "qwen235" in ready else (ready[0] if ready else all_names[0])
     m2_candidates = [k for k in ("gemma31", "det_qwen235", "gemma31_free", "nemotron_free", "det_dino", "photo_dino")
                      if k in ready and k != m1]
@@ -129,6 +131,68 @@ def _predict_item(item: dict, model_a, model_b, boxes_map: dict | None, kind_a: 
             pred_a = fa.result()
             pred_b = fb.result()
     return key, rgb, pred_a, pred_b
+
+
+FRAME_CROP = "frame_crop_qwen235"
+FRAME_NAME = "Qwen235 · целое фото"
+CROP_NAME = "Qwen235 · основной вырез"
+
+
+def _frame_crop_verdict(prediction, names):
+    decision = compare_predictions(
+        {**prediction, "sub_opinions": [], "crop_results": []}, None, FRAME_CROP, None, names
+    )
+    outcome = (prediction.get("objects") or [{}])[0].get("status") or "review"
+    decision["outcome"] = outcome
+    decision["agreed"] = outcome != "review"
+    reason = prediction.get("review_reason")
+    if outcome == "review" and reason:
+        decision["disagreement_reasons"] = [reason]
+    decision["checks"] = {}
+    for prefix, slot, name in (("frame", "model_a", FRAME_NAME), ("crop", "model_b", CROP_NAME)):
+        label = prediction.get(prefix + "_class") or "review"
+        description = prediction.get(prefix + "_description") or ""
+        kind, _, state = label.partition("_")
+        kind = {"rs": "rsh", "tk": "tksh"}.get(kind)
+        damage = {"mech": "mechanical_damage", "paint": "coating_corrosion"}.get(state)
+        status = "ok" if state == "ok" else "bad" if damage else "review"
+        bbox = decision["objects"][0].get("bbox") if prefix == "crop" and decision["objects"] else None
+        objects = [{"type": kind, "status": status, "damage": damage, "description": description, "bbox": bbox}]
+        decision[slot] = {"name": name, "status": status, "objects": objects}
+        decision["checks"][prefix + "_class"] = label
+        decision["checks"][prefix + "_description"] = description
+    frame_class = prediction.get("frame_class")
+    crop_class = prediction.get("crop_class")
+    if outcome == "review" and frame_class and crop_class and "review" not in (frame_class, crop_class):
+        frame_type, frame_state = frame_class.split("_")
+        crop_type, crop_state = crop_class.split("_")
+        categories = []
+        if frame_type != crop_type:
+            categories.append("type")
+        if frame_state != crop_state:
+            categories.append("status" if "ok" in (frame_state, crop_state) else "damage")
+        if categories:
+            decision["disagreement_categories"] = categories
+    return decision
+
+
+def _export_results(items, verdicts, names, overrides=None):
+    tables = build_export_tables(items, verdicts, names, overrides=overrides)
+    for sheet in ("frames", "objects", "repair", "review"):
+        for row in tables[sheet]:
+            row.update(verdicts[row["file"]].get("checks", {}))
+    tables["passport"] = []
+    for filename, verdict in verdicts.items():
+        asset = verdict.get("asset") or {}
+        assessment = verdict.get("assessment") or {}
+        tables["passport"].append({
+            "file": filename, "asset_id": asset.get("asset_id") or "", "identity": asset.get("identity_status", ""),
+            "registry": asset.get("registry_status", ""), "address": asset.get("address") or "",
+            "lat": asset.get("lat"), "lon": asset.get("lon"), "effect": assessment.get("effect", ""),
+            "recommendation": assessment.get("recommendation", ""), "urgency": assessment.get("urgency", ""),
+            "scope": verdict.get("scope", ""),
+        })
+    return tables
 
 
 def _to_excel_bytes(tables: dict[str, list[dict]]) -> bytes:
@@ -196,7 +260,8 @@ def _render_model_opinion_block(summary: dict | None, title: str, names: dict[st
         return
 
     objs = summary.get("objects") or []
-    st.caption(f"Итог по кадру: **{status_label(summary['status'])}** · объектов: {len(objs)} · {summary['seconds']:.1f} с")
+    elapsed = f" · {summary['seconds']:.1f} с" if 'seconds' in summary else ""
+    st.caption(f"Итог: **{status_label(summary['status'])}**{elapsed}")
     if not objs:
         st.write("Объекты не найдены.")
     else:
@@ -224,7 +289,7 @@ def _render_model_opinion_block(summary: dict | None, title: str, names: dict[st
 
 
 def _render_disagreement_section(verdict: dict, names: dict[str, str]) -> None:
-    st.markdown("#### Как разошелось мнение моделей")
+    st.markdown("#### Почему фото передано на проверку" if verdict.get("checks") else "#### Как разошелось мнение моделей")
     reasons = verdict.get("disagreement_reasons") or []
     if reasons:
         for r in reasons:
@@ -247,7 +312,7 @@ def _render_disagreement_section(verdict: dict, names: dict[str, str]) -> None:
             _render_model_opinion_block(ma, "Детализация модели", names, "🟠")
 
 
-def _render_item_meta(item: dict) -> None:
+def _render_item_meta(item: dict, verdict: dict) -> None:
     meta = item.get("meta") or {}
     parts = []
     if item.get("gt_label"):
@@ -256,9 +321,19 @@ def _render_item_meta(item: dict) -> None:
         if meta.get(k):
             parts.append(f"{k}: `{meta[k]}`")
     if meta.get("lat") not in (None, "") and meta.get("lon") not in (None, ""):
-        parts.append(f"Координаты: `{meta['lat']}, {meta['lon']}`")
+        parts.append(f"Координаты снимка: `{meta['lat']}, {meta['lon']}`")
+    asset = verdict.get("asset") or {}
+    if asset.get("registry_status") == "matched":
+        parts.append(f"Реестр: {asset['asset_id']}")
+        if asset.get("address"):
+            parts.append(str(asset["address"]))
+        if asset.get("lat") is not None and asset.get("lon") is not None:
+            parts.append(f"Координаты объекта: `{asset['lat']}, {asset['lon']}`")
     if parts:
         st.caption(" · ".join(parts))
+    recommendation = (verdict.get("assessment") or {}).get("recommendation")
+    if recommendation:
+        st.write(f"Рекомендация по автоматической оценке: {recommendation}")
     if item.get("meta_description"):
         st.caption(f"Описание из таблицы дата-сета: {item['meta_description']}")
 
@@ -371,22 +446,29 @@ def main() -> None:
             help="Для шкафов МГТС (ТКШ / РЩ) выберите первый профиль.",
         )
 
-        dual_mode = st.radio(
-            "Режим проверки",
-            ["Сверка двух моделей (консенсус)", "Одна модель"],
-            index=0,
-        ) == "Сверка двух моделей (консенсус)"
+        chosen_mode = "Кадр и вырез · Qwen235"
+        modes = ["Сверка двух моделей (консенсус)", "Одна модель"]
+        if FRAME_CROP in variant_names:
+            modes.insert(0, chosen_mode)
+        mode = st.radio("Режим проверки", modes)
+        frame_crop_mode = mode == chosen_mode
+        dual_mode = mode == "Сверка двух моделей (консенсус)"
 
         def format_variant(v_name: str) -> str:
             ok, _ = variant_readiness(v_name, cfg_base)
             return f"{'✓' if ok else '⚠'} {v_name}"
 
-        model_a_name = st.selectbox(
-            "Основная модель (Модель 1)",
-            variant_names,
-            index=variant_names.index(default_m1),
-            format_func=format_variant,
-        )
+        if frame_crop_mode:
+            model_a_name = FRAME_CROP
+            st.caption("Grounding DINO находит корпуса. Qwen235 проверяет целое фото и каждый вырез.")
+        else:
+            alternative_names = [name for name in variant_names if name != FRAME_CROP]
+            model_a_name = st.selectbox(
+                "Основная модель (Модель 1)",
+                alternative_names,
+                index=alternative_names.index(default_m1),
+                format_func=format_variant,
+            )
         ok_a, msg_a = variant_readiness(model_a_name, cfg_base)
         v_a = cfg_base["variants"][model_a_name]
         st.caption(f"{v_a.get('kind', 'vlm')} · {v_a.get('model') or v_a.get('vlm')} · {msg_a}")
@@ -394,7 +476,7 @@ def main() -> None:
         model_b_name: str | None = None
         ok_b, msg_b = True, ""
         if dual_mode:
-            b_choices = [v for v in variant_names if v != model_a_name] or variant_names
+            b_choices = [v for v in variant_names if v not in {model_a_name, FRAME_CROP}] or variant_names
             b_idx = b_choices.index(default_m2) if default_m2 in b_choices else 0
             model_b_name = st.selectbox(
                 "Модель для сверки (Модель 2)",
@@ -406,7 +488,7 @@ def main() -> None:
             v_b = cfg_base["variants"][model_b_name]
             st.caption(f"{v_b.get('kind', 'vlm')} · {v_b.get('model') or v_b.get('vlm')} · {msg_b}")
 
-        if not ok_a:
+        if not ok_a and not frame_crop_mode:
             st.error(f"Модель 1 не готова: {msg_a}")
         if dual_mode and not ok_b:
             st.error(f"Модель 2 не готова: {msg_b}")
@@ -419,14 +501,19 @@ def main() -> None:
             disabled=not can_run,
         )
 
+        example_clicked = st.button("Открыть готовый пример", width="stretch")
+
     # ==================== ЦЕНТРАЛЬНАЯ ОБЛАСТЬ ====================
     st.title("Диагностика сетевой инфраструктуры и шкафов по фото")
 
-    if run_clicked:
+    if run_clicked or example_clicked:
+        if example_clicked:
+            model_a_name, model_b_name, profile_key = FRAME_CROP, None, "cabinets"
         cfg_run = apply_taxonomy_profile(cfg_base, profile_key)
         names = build_display_names(cfg_run)
-        out = ROOT / "out" / "app" / time.strftime("%Y%m%d-%H%M%S")
-        out.mkdir(parents=True, exist_ok=True)
+        results_dir = ROOT / "out" / "app"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        out = Path(mkdtemp(prefix=time.strftime("%Y%m%d-%H%M%S-"), dir=results_dir))
         (out / "annotated").mkdir(parents=True, exist_ok=True)
 
         # Центральный блок прогресса (лоад-бар)
@@ -436,70 +523,83 @@ def main() -> None:
         live_stats_box = st.empty()
 
         try:
-            stage_box.info("Этап 1/3: Распаковка и индексация дата-сета…")
-            input_dir = out / "input"
-            if upload_mode == "Фотографии":
-                ds_root = ingest_uploaded_photos(uploaded_photos, input_dir)
-            elif upload_mode == "Папка":
-                if uploaded_dir_files:
-                    ds_root = ingest_uploaded_directory(uploaded_dir_files, input_dir)
-                else:
-                    ds_root = ingest_local_directory(Path(local_dir_path.strip()))
-            else:
-                ds_root = ingest_zip_archive(uploaded_zip, input_dir)
-
-            meta_path = None
-            if extra_meta_file is not None:
-                meta_path = out / ("extra_meta" + Path(extra_meta_file.name).suffix)
-                meta_path.write_bytes(extra_meta_file.getbuffer())
-
-            boxes_path = None
-            if extra_boxes_file is not None:
-                boxes_path = out / "extra_boxes.json"
-                boxes_path.write_bytes(extra_boxes_file.getbuffer())
-
             registry = None
-            if registry_file is not None:
-                reg_path = out / ("registry" + Path(registry_file.name).suffix)
-                reg_path.write_bytes(registry_file.getbuffer())
-                try:
-                    registry = load_registry(read_meta(reg_path))
-                    st.caption(f"Реестр: {len(registry)} объектов")
-                except ValueError as exc:
-                    st.error(f"Реестр отклонён: {exc}")
-            bundle = inspect_dataset(ds_root, extra_meta_file=meta_path, extra_boxes_file=boxes_path)
-            if len(bundle.items) > photo_limit:
-                bundle.warnings.append(
-                    f"Ограничение прогона: обработано {photo_limit} из {len(bundle.items)} фото."
+            example_predictions = {}
+            if example_clicked:
+                from defense_examples import load_examples
+                examples = load_examples()
+                if not examples:
+                    raise ValueError("Сохранённые примеры недоступны")
+                bundle = DatasetBundle(root=out, items=[])
+                for path, prediction in examples:
+                    bundle.items.append({"key": path.name, "path": path, "meta": {}})
+                    example_predictions[path.name] = prediction
+                pool_workers = 1
+            else:
+                stage_box.info("Этап 1/3: Распаковка и индексация дата-сета…")
+                input_dir = out / "input"
+                if upload_mode == "Фотографии":
+                    ds_root = ingest_uploaded_photos(uploaded_photos, input_dir)
+                elif upload_mode == "Папка":
+                    if uploaded_dir_files:
+                        ds_root = ingest_uploaded_directory(uploaded_dir_files, input_dir)
+                    else:
+                        ds_root = ingest_local_directory(Path(local_dir_path.strip()))
+                else:
+                    ds_root = ingest_zip_archive(uploaded_zip, input_dir)
+
+                meta_path = None
+                if extra_meta_file is not None:
+                    meta_path = out / ("extra_meta" + Path(extra_meta_file.name).suffix)
+                    meta_path.write_bytes(extra_meta_file.getbuffer())
+
+                boxes_path = None
+                if extra_boxes_file is not None:
+                    boxes_path = out / "extra_boxes.json"
+                    boxes_path.write_bytes(extra_boxes_file.getbuffer())
+
+                if registry_file is not None:
+                    reg_path = out / ("registry" + Path(registry_file.name).suffix)
+                    reg_path.write_bytes(registry_file.getbuffer())
+                    try:
+                        registry = load_registry(read_meta(reg_path))
+                        st.caption(f"Реестр: {len(registry)} объектов")
+                    except ValueError as exc:
+                        st.error(f"Реестр отклонён: {exc}")
+                bundle = inspect_dataset(ds_root, extra_meta_file=meta_path, extra_boxes_file=boxes_path)
+                if len(bundle.items) > photo_limit:
+                    bundle.warnings.append(
+                        f"Ограничение прогона: обработано {photo_limit} из {len(bundle.items)} фото."
+                    )
+                    bundle.items = bundle.items[:photo_limit]
+                for w in bundle.warnings:
+                    st.warning(w)
+
+                progress_bar.progress(0.05, text=f"Найдено фотографий: {len(bundle.items)}. Загрузка моделей…")
+                stage_box.info(
+                    f"Этап 2/3: Загрузка моделей (`{model_a_name}`"
+                    + (f" и `{model_b_name}`" if model_b_name else "")
+                    + ")…"
                 )
-                bundle.items = bundle.items[:photo_limit]
-            for w in bundle.warnings:
-                st.warning(w)
 
-            progress_bar.progress(0.05, text=f"Найдено фотографий: {len(bundle.items)}. Загрузка моделей…")
-            stage_box.info(
-                f"Этап 2/3: Загрузка моделей (`{model_a_name}`"
-                + (f" и `{model_b_name}`" if model_b_name else "")
-                + ")…"
-            )
+                model_a = _model_for_session("a", model_a_name, cfg_run)
+                model_b = _model_for_session("b", model_b_name, cfg_run) if model_b_name else None
+                kind_a = cfg_run["variants"][model_a_name].get("kind", "vlm")
+                kind_b = cfg_run["variants"][model_b_name].get("kind", "vlm") if model_b_name else None
 
-            model_a = _model_for_session("a", model_a_name, cfg_run)
-            model_b = _model_for_session("b", model_b_name, cfg_run) if model_b_name else None
-            kind_a = cfg_run["variants"][model_a_name].get("kind", "vlm")
-            kind_b = cfg_run["variants"][model_b_name].get("kind", "vlm") if model_b_name else None
+                if "boxes_dino" in (kind_a, kind_b) and bundle.boxes is None:
+                    raise ValueError("Выбран вариант boxes_dino, но файл рамок boxes.json не загружен.")
 
-            if "boxes_dino" in (kind_a, kind_b) and bundle.boxes is None:
-                raise ValueError("Выбран вариант boxes_dino, но файл рамок boxes.json не загружен.")
+                workers_a = getattr(model_a, "workers", 2)
+                workers_b = getattr(model_b, "workers", 2) if model_b else workers_a
+                pool_workers = max(1, min(6, max(workers_a, workers_b)))
+                if kind_a in ("det_vlm", "det_dino", "grounding_qwen", "frame_crop_qwen", "photo_dino") or kind_b in (
+                    "det_vlm", "det_dino", "grounding_qwen", "frame_crop_qwen", "photo_dino"
+                ):
+                    # Локальные нейросети имеют lock; 2 воркера позволяют перекрывать CPU и сетевой VLM без лишней памяти
+                    pool_workers = min(pool_workers, 2)
 
             total = len(bundle.items)
-            workers_a = getattr(model_a, "workers", 2)
-            workers_b = getattr(model_b, "workers", 2) if model_b else workers_a
-            pool_workers = max(1, min(6, max(workers_a, workers_b)))
-            if kind_a in ("det_vlm", "det_dino", "grounding_qwen", "photo_dino") or kind_b in (
-                "det_vlm", "det_dino", "grounding_qwen", "photo_dino"
-            ):
-                # Локальные нейросети имеют lock; 2 воркера позволяют перекрывать CPU и сетевой VLM без лишней памяти
-                pool_workers = min(pool_workers, 2)
 
             verdicts_by_key: dict[str, dict] = {}
             annotated_paths: dict[str, Path] = {}
@@ -507,21 +607,26 @@ def main() -> None:
             t_start = time.monotonic()
             done_bad = done_review = done_ok = 0
 
-            stage_box.info(
-                f"Этап 3/3: Анализ {total} фото и сверка результатов…"
-            )
+            stage_box.info("Открываем сохранённые ответы…" if example_clicked else f"Этап 3/3: Анализ {total} фото и сверка результатов…")
 
             with ThreadPoolExecutor(max_workers=pool_workers) as executor:
-                futures = {
-                    executor.submit(
-                        _predict_item, item, model_a, model_b, bundle.boxes, kind_a, kind_b
-                    ): item
-                    for item in bundle.items
-                }
+                if example_clicked:
+                    def replay(item):
+                        with Image.open(item["path"]) as image:
+                            return item["key"], image.convert("RGB"), example_predictions[item["key"]], None
+                    futures = {executor.submit(replay, item): item for item in bundle.items}
+                else:
+                    futures = {
+                        executor.submit(_predict_item, item, model_a, model_b, bundle.boxes, kind_a, kind_b): item
+                        for item in bundle.items
+                    }
                 for done_idx, fut in enumerate(as_completed(futures), 1):
                     item = futures[fut]
                     key, rgb, pred_a, pred_b = fut.result()
-                    verdict = compare_predictions(pred_a, pred_b, model_a_name, model_b_name, names)
+                    if model_a_name == FRAME_CROP:
+                        verdict = _frame_crop_verdict(pred_a, names)
+                    else:
+                        verdict = compare_predictions(pred_a, pred_b, model_a_name, model_b_name, names)
                     verdict = enrich_result(verdict, meta=bundle.meta_by_key.get(key, {}), registry=registry)
                     verdicts_by_key[key] = verdict
                     raw_preds[key] = {"model_a": pred_a, "model_b": pred_b, "verdict": verdict}
@@ -555,24 +660,10 @@ def main() -> None:
                         lc[3].metric("Исправно", done_ok)
 
             # Сохранение результатов на диск
-            tables = build_export_tables(bundle.items, verdicts_by_key, names)
-            tables["passport"] = [
-                {"file": k,
-                 "asset_id": (v.get("asset") or {}).get("asset_id") or "",
-                 "identity": (v.get("asset") or {}).get("identity_status", ""),
-                 "registry": (v.get("asset") or {}).get("registry_status", ""),
-                 "address": (v.get("asset") or {}).get("address") or "",
-                 "lat": (v.get("asset") or {}).get("lat"),
-                 "lon": (v.get("asset") or {}).get("lon"),
-                 "effect": (v.get("assessment") or {}).get("effect", ""),
-                 "recommendation": (v.get("assessment") or {}).get("recommendation", ""),
-                 "urgency": (v.get("assessment") or {}).get("urgency", ""),
-                 "scope": v.get("scope", "")}
-                for k, v in verdicts_by_key.items()
-            ]
+            tables = _export_results(bundle.items, verdicts_by_key, names)
             for t_name, t_rows in tables.items():
                 write_csv(out / f"{t_name}.csv", t_rows)
-            (out / "preds.json").write_text(json.dumps(raw_preds, ensure_ascii=False, indent=1, default=str))
+            (out / "preds.json").write_text(json.dumps(raw_preds, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
 
             st.session_state["ui_result"] = {
                 "out": out,
@@ -580,13 +671,18 @@ def main() -> None:
                 "verdicts": verdicts_by_key,
                 "annotated": annotated_paths,
                 "names": names,
-                "model_a": model_a_name,
-                "model_b": model_b_name,
+                "model_a": FRAME_NAME if model_a_name == FRAME_CROP else model_a_name,
+                "model_b": CROP_NAME if model_a_name == FRAME_CROP else model_b_name,
+                "frame_crop": model_a_name == FRAME_CROP,
+                "example": example_clicked,
                 "profile_title": TAXONOMY_PROFILES[profile_key]["title"],
                 "elapsed": round(time.monotonic() - t_start, 1),
             }
             st.session_state["ui_overrides"] = {}
-            stage_box.success(f"Готово! Обработано {total} фото за {time.monotonic() - t_start:.1f} с.")
+            if example_clicked:
+                stage_box.empty()
+            else:
+                stage_box.success(f"Обработано {total} фото за {time.monotonic() - t_start:.1f} с.")
             progress_bar.progress(1.0, text=f"Завершено: {total} / {total} фото (100%)")
             live_stats_box.empty()
         except Exception as exc:
@@ -614,11 +710,14 @@ def main() -> None:
 
     st.divider()
     st.subheader("📊 Общие результаты по дата-сету")
+    if res.get("example"):
+        st.info("Сохранённый результат прогона на официальных фото МГТС. Открытие примера не вызывает API.")
     st.caption(
         f"Профиль: **{res['profile_title']}** · Модель 1: `{model_a_name}`"
         + (f" · Модель 2: `{model_b_name}`" if model_b_name else " · Одиночный режим")
-        + f" · Время прогона: {res['elapsed']} с"
-        + f" · Стоимость по API: ${summary['total_cost']:.3f}"
+        + ("" if res.get("example") else f" · Время прогона: {res['elapsed']} с")
+        + (f" · API в исходном прогоне: ${summary['total_cost']:.5f}" if res.get("example")
+           else f" · Стоимость по API: ${summary['total_cost']:.5f}")
     )
 
     k1, k2, k3, k4, k5, k6 = st.columns(6)
@@ -629,7 +728,9 @@ def main() -> None:
     k4.metric("На доп. подтверждение", summary["review_photos"], delta=f"{pct_review:.0f}% фото", delta_color="off")
     k5.metric("Исправно (фото)", summary["confirmed_ok_photos"])
     if summary["agreement_rate"] is not None:
-        k6.metric("Согласие моделей", f"{summary['agreement_rate']:.0%}", delta=f"{summary['avg_seconds']:.1f} с/фото", delta_color="off")
+        timing_label = "с/фото в исходном прогоне" if res.get("example") else "с/фото"
+        k6.metric("Согласие проверок", f"{summary['agreement_rate']:.0%}",
+                  delta=f"{summary['avg_seconds']:.1f} {timing_label}", delta_color="off")
     else:
         k6.metric("Среднее время", f"{summary['avg_seconds']:.1f} с/фото", delta=f"${summary['total_cost']:.3f}" if summary["total_cost"] else None)
     st.caption(
@@ -710,7 +811,7 @@ def main() -> None:
         gc5.metric("Damage Acc", f"{gm['damage_acc']:.1%}")
 
     # Экспорт таблиц (с учётом ручных подтверждений оператора)
-    export_tables = build_export_tables(bundle.items, verdicts, names, overrides=overrides)
+    export_tables = _export_results(bundle.items, verdicts, names, overrides=overrides)
     d1, d2, d3, d4, d5 = st.columns(5)
     for col, fname, tkey in (
         (d1, "repair.csv", "repair"),
@@ -803,17 +904,23 @@ def main() -> None:
                 img_col, info_col = st.columns([3, 2])
                 img_col.image(str(annotated[key]), width="stretch")
                 with info_col:
-                    _render_item_meta(it)
+                    _render_item_meta(it, v)
                     _render_object_cards(v, names, show_agreement_note=True)
                     if overrides.get(key) == "bad":
                         _render_disagreement_section(v, names)
+                    elif v.get("checks"):
+                        _render_model_opinion_block(v["model_a"], "Целое фото", names, "")
+                        _render_model_opinion_block(v["model_b"], "Основная рамка", names, "")
 
     # ==================== СПИСОК 2: ФОТО ДЛЯ ДОП. ПОДТВЕРЖДЕНИЯ ====================
     st.subheader(f"🟠 Фото для дополнительного подтверждения ({len(review_items)})")
     if not review_items:
         st.success("Спорных фотографий, требующих дополнительного подтверждения, нет.")
     else:
-        st.caption("Оранжевая сплошная рамка — Модель 1; синяя пунктирная рамка — Модель 2 (при наличии обеих моделей).")
+        if res.get("frame_crop"):
+            st.caption("Синяя пунктирная рамка показывает корпус второй проверки. Первая проверка оценивает весь кадр.")
+        else:
+            st.caption("Оранжевая сплошная рамка — Модель 1; синяя пунктирная рамка — Модель 2 (при наличии обеих моделей).")
         for it in review_items:
             key = it["key"]
             v = verdicts[key]
@@ -826,7 +933,7 @@ def main() -> None:
                 img_col, info_col = st.columns([3, 2])
                 img_col.image(str(annotated[key]), width="stretch")
                 with info_col:
-                    _render_item_meta(it)
+                    _render_item_meta(it, v)
                     st.markdown("#### Классификация и описания объектов")
                     _render_object_cards(v, names, show_agreement_note=False)
                 st.divider()
@@ -837,7 +944,7 @@ def main() -> None:
                     "Решение оператора",
                     ["Оставить на проверке", "Подтвердить поломку", "Признать исправным"],
                     index={"review": 0, "bad": 1, "ok": 2}[prev],
-                    key=f"op_decision_{key}",
+                    key=f"op_decision_{res['out'].name}_{key}",
                     horizontal=True,
                 )
                 mapped = {"Оставить на проверке": "review", "Подтвердить поломку": "bad", "Признать исправным": "ok"}[choice]
@@ -846,6 +953,8 @@ def main() -> None:
                         overrides.pop(key, None)
                     else:
                         overrides[key] = mapped
+                    for table_name, rows in _export_results(bundle.items, verdicts, names, overrides).items():
+                        write_csv(res["out"] / f"{table_name}.csv", rows)
                     st.rerun()
 
     # ==================== СПИСОК 3: ИСПРАВНЫЕ ОБЪЕКТЫ ====================
@@ -861,8 +970,11 @@ def main() -> None:
                 img_col, info_col = st.columns([3, 2])
                 img_col.image(str(annotated[key]), width="stretch")
                 with info_col:
-                    _render_item_meta(it)
+                    _render_item_meta(it, v)
                     _render_object_cards(v, names, show_agreement_note=True)
+                    if v.get("checks"):
+                        _render_model_opinion_block(v["model_a"], "Целое фото", names, "")
+                        _render_model_opinion_block(v["model_b"], "Основная рамка", names, "")
 
 
 if __name__ == "__main__":

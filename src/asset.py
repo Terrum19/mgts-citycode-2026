@@ -99,9 +99,9 @@ def assess_frame(frame: Mapping[str, Any], *, evidence_text: str = "") -> dict:
         function, basis = "unknown", "status=review"
     elif status != "bad":
         function, basis = "unknown", f"status={status or 'нет'}"
-    elif "ЛКП" in damage_upper:
+    elif "ЛКП" in damage_upper or damage_upper in {"COATING_CORROSION", "PAINT"}:
         function, basis = "coating", "status=bad; damage=ЛКП"
-    elif "МП" in damage_upper:
+    elif "МП" in damage_upper or damage_upper in {"MECHANICAL_DAMAGE", "MECHANICAL"}:
         # Текст описания может уточнить функцию и повысить срочность, но не отменить дефект.
         if any(w in text for w in MOUNT_PHRASES):
             function, basis = "mounting", "status=bad; damage=МП; текст: крепление"

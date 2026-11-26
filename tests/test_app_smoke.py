@@ -1,3 +1,4 @@
+import csv
 import io
 import sys
 import tempfile
@@ -83,6 +84,67 @@ class _FakeModelB:
 import shutil
 
 class AppSmokeTests(unittest.TestCase):
+    def test_saved_frame_crop_demo_uses_real_results_without_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch("vlm.ROOT", root), patch("variants.make", side_effect=AssertionError("live model")):
+                app = AppTest.from_file(str(ROOT / "src" / "app.py"), default_timeout=20).run()
+                self.assertFalse(app.exception)
+                self.assertEqual(app.sidebar.radio[1].value, "Кадр и вырез · Qwen235")
+                next(button for button in app.sidebar.button if button.label == "Открыть готовый пример").click().run()
+                self.assertFalse(app.exception)
+                self.assertTrue(any("Сохранённый результат" in item.value for item in app.info))
+                result = app.session_state["ui_result"]
+                verdicts = result["verdicts"]
+                self.assertEqual(verdicts["29159065.jpg"]["outcome"], "bad")
+                self.assertEqual(verdicts["35453689.jpg"]["outcome"], "review")
+                explanation = verdicts["35453689.jpg"]["checks"]["crop_description"]
+                captions = " ".join(element.value for element in app.caption)
+                self.assertIn(explanation, captions)
+                self.assertIn("API в исходном прогоне", captions)
+                self.assertNotIn("Одиночный режим", captions)
+                self.assertEqual(verdicts["29159065.jpg"]["assessment"]["urgency"], "planned")
+                self.assertEqual(verdicts["35453689.jpg"]["assessment"]["urgency"], "manual_review")
+                with (result["out"] / "frames.csv").open(encoding="utf-8-sig") as stream:
+                    frames = {row["file"]:row for row in csv.DictReader(stream)}
+                self.assertEqual(frames["29159065.jpg"]["frame_class"], "rs_paint")
+                self.assertEqual(frames["35453689.jpg"]["crop_class"], "rs_paint")
+                self.assertTrue((result["out"] / "annotated/35453689.jpg").is_file())
+                operator = next(radio for radio in app.radio if radio.key and radio.key.startswith("op_decision_"))
+                operator.set_value("Признать исправным").run()
+                self.assertFalse(app.exception)
+                with (result["out"] / "frames.csv").open(encoding="utf-8-sig") as stream:
+                    updated = {row["file"]: row for row in csv.DictReader(stream)}
+                self.assertEqual(updated["35453689.jpg"]["outcome"], "ok")
+                self.assertEqual(updated["35453689.jpg"]["operator_override"], "ok")
+                self.assertEqual(updated["35453689.jpg"]["frame_class"], "rs_mech")
+
+    def test_selected_live_route_uses_one_backend_and_preserves_each_check(self):
+        from defense_examples import load_examples
+        examples = load_examples()
+        model = _FakeModelA()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            folder = root / "photos"
+            folder.mkdir()
+            source, answer = examples[0]
+            shutil.copyfile(source, folder / "new.jpg")
+            with (
+                patch("vlm.ROOT", root),
+                patch("variants.make", return_value=model) as make,
+                patch.object(model, "predict", return_value=answer) as predict,
+                patch("consensus.variant_readiness", return_value=(True, "Готов")),
+            ):
+                app = AppTest.from_file(str(ROOT / "src" / "app.py"), default_timeout=20).run()
+                app.sidebar.text_input[0].set_value(str(folder)).run()
+                app.sidebar.button[0].click().run()
+                self.assertFalse(app.exception)
+                self.assertEqual(make.call_args.args[0], "frame_crop_qwen235")
+                predict.assert_called_once()
+                result = app.session_state["ui_result"]
+                self.assertFalse(result["example"])
+                self.assertEqual(result["verdicts"]["new.jpg"]["checks"]["crop_description"], answer["crop_description"])
+
     def test_app_initial_render_and_local_folder_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -106,7 +168,6 @@ class AppSmokeTests(unittest.TestCase):
             with (
                 patch("variants.make", side_effect=fake_make),
                 patch("consensus.variant_readiness", side_effect=fake_ready),
-                patch.dict("sys.modules", {}),
             ):
                 # Запускаем AppTest и удаляем временный каталог out/app после теста
                 before = set((ROOT / "out" / "app").glob("*")) if (ROOT / "out" / "app").exists() else set()
@@ -119,6 +180,7 @@ class AppSmokeTests(unittest.TestCase):
                     self.assertEqual(at.sidebar.radio[0].options, ["Папка", "Фотографии", "ZIP-архив"])
 
                     # Вводим путь к локальной папке в сайдбаре и запускаем анализ
+                    at.sidebar.radio[1].set_value("Сверка двух моделей (консенсус)").run()
                     at.sidebar.text_input[0].set_value(str(ds_dir)).run()
                     btn = at.sidebar.button[0]
                     self.assertFalse(btn.disabled)
