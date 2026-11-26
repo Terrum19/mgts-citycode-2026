@@ -58,6 +58,20 @@ echo "OPENROUTER_API_KEY=..." >> .env
 Тип и ID объекта можно опустить. Для папок тестовых фото, которые являются просто
 каталогами, укажите `--test-format images`. Для размеченного теста используйте `--test-format labeled`.
 
+### ТКШ и РЩ: Grounding DINO и Qwen по каждой рамке
+
+```bash
+python src/pipeline.py --variant det_grounding_qwen235 \
+  --images PHOTO_DIR --meta photos.xlsx --out out/grounding-qwen
+```
+
+Требуются `requirements-detector.txt`, локальный снимок `IDEA-Research/grounding-dino-tiny`
+в `weights/grounding-dino-tiny/` и `OPENROUTER_API_KEY`. Grounding DINO ищет оба типа
+оборудования. После подавления пересекающихся дублей каждый оставшийся вырез с запасом
+проверяется отдельным запросом Qwen. Тип определяется по вырезу. В `preds.json` запись
+`crop_results` хранит вердикт или ошибку для каждой рамки, включая отклонённый фон.
+Подтверждённые дефекты идут в `repair.csv`, сомнения и ошибки API — в `review.csv`.
+
 ### Обучение и оценка кропов
 
 ```bash

@@ -87,6 +87,9 @@ def make(name: str, cfg: dict):
     if kind in ("det_dino", "boxes_dino"):
         from crop_dino import CropDino
         return CropDino(vcfg, cfg["detector"] if kind == "det_dino" else None)
+    if kind == "grounding_qwen":
+        from grounding_qwen import GroundingQwen
+        return GroundingQwen(vcfg, cfg)
     if kind == "det_vlm":
         return DetVLM(vcfg, cfg)
     raise ValueError(f"неизвестный kind={kind!r} у варианта {name}")

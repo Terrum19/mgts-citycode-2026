@@ -37,6 +37,10 @@ cables_exposed = "Оголённые кабели"
 cable_coil_unwound = "Размотан запас кабеля"
 equipment_fallen = "Оборудование сорвано"
 unknown = "Повреждение (вид не определён)"
+tksh = "Телекоммуникационный климатический шкаф"
+rsh = "Распределительный щит"
+coating_corrosion = "Повреждение ЛКП / коррозия"
+mechanical_damage = "Механическое повреждение"
 
 # Размеченные наборы для run.py. Панорамы: data/labels.json из src/label/export.py.
 [datasets.pano_dev]
@@ -105,6 +109,19 @@ workers = 6
 kind = "det_vlm"
 vlm = "qwen235"
 workers = 4
+
+# ДСС: отдельный запрос Qwen на каждую предложенную рамку ТКШ или РЩ.
+[variants.det_grounding_qwen235]
+kind = "grounding_qwen"
+model = "weights/grounding-dino-tiny"
+vlm = "qwen235"
+workers = 4
+min_score = 0.22
+text_threshold = 0.20
+min_side = 20
+dedup_iou = 0.50
+pad = 0.30
+crop_min_side = 96
 
 [variants.det_dino]
 kind = "det_dino"
