@@ -41,6 +41,12 @@ tksh = "Телекоммуникационный климатический шк
 rsh = "Распределительный щит"
 coating_corrosion = "Повреждение ЛКП / коррозия"
 mechanical_damage = "Механическое повреждение"
+# Ключи, которые реально отдаёт folders.split_label на выдаче ДСС.
+"ТКШ" = "ТКШ (климатический шкаф)"
+"РЩ" = "РЩ (распределительный щит)"
+"МП" = "Механические повреждения"
+"Неудовлетворительное состояние ЛКП" = "Повреждение ЛКП / коррозия"
+"Удовлетворительное состояние" = "Норма"
 
 # Размеченные наборы для run.py. Панорамы: data/labels.json из src/label/export.py.
 [datasets.pano_dev]
@@ -142,3 +148,15 @@ min_confidence = 0.55
 [variants.photo_dino]
 kind = "photo_dino"
 checkpoint = "out/final/photo_dino.joblib"
+
+# Обучено на выдаче ДСС (61 фото, 6 классов ТКШ/РЩ × Норма/ЛКП/МП), офлайн на CPU.
+# Рамок в выдаче нет, поэтому вариант кадровый: локализация не выполняется.
+[variants.photo_dino_dss]
+kind = "photo_dino"
+checkpoint = "out/dss_final/photo_dino.joblib"
+device = "cpu"
+
+[variants.photo_dino_offline]
+kind = "photo_dino"
+checkpoint = "out/dss_final/photo_dino.joblib"
+device = "cpu"

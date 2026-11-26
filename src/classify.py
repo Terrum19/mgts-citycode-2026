@@ -28,6 +28,10 @@ OK_WORDS = ("норм", "исправ", "без дефект", "без повр�
 
 def is_ok(defect: str) -> bool:
     normalized = defect.lower()
+    if "неудовлетвор" in normalized:          # проверяем отрицание раньше положительного статуса
+        return False
+    if "удовлетвор" in normalized:
+        return True
     return "неисправ" not in normalized and any(w in normalized for w in OK_WORDS)
 
 
@@ -36,7 +40,9 @@ def make_clf(C: float = 2.0):
 
 
 def groups_of(items: list[dict]) -> list[str]:
-    return [str(x["extra"].get("Группа", x["file"])) for x in items]
+    """Группа: явная колонка «Группа», иначе имя файла без пути — одинаковые ID из разных папок
+    не должны попадать в разные фолды."""
+    return [str(x["extra"].get("Группа") or Path(x["file"]).stem) for x in items]
 
 
 def evaluate(items, X, y, folds: int, C: float) -> dict:

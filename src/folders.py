@@ -24,7 +24,28 @@ def read_table(path: Path):
     return pd.read_excel(path)
 
 
+def _dss_key(label: str) -> str:
+    """Нормализация имени папки выдачи ДСС: регистр, пробелы и точки не важны."""
+    s = re.sub(r"\s*\.\s*", ".", label.strip().casefold())
+    return re.sub(r"\s+", " ", s)
+
+
+# Грамматика выдачи ДСС: сначала состояние/дефект, затем тип объекта. Возвращаем (тип, дефект).
+DSS_LABELS = {
+    "мп.рщ": ("РЩ", "МП"),
+    "мп.ткш": ("ТКШ", "МП"),
+    "неудовлетворительное состояние лкп.рщ": ("РЩ", "Неудовлетворительное состояние ЛКП"),
+    "неудовлетворительное состояние лкп.ткш": ("ТКШ", "Неудовлетворительное состояние ЛКП"),
+    "удовлетворительное состояние рщ": ("РЩ", "Удовлетворительное состояние"),
+    "удовлетворительное состояние ткш": ("ТКШ", "Удовлетворительное состояние"),
+}
+
+
 def split_label(label: str, sep: str | None) -> tuple[str, str]:
+    """-> (тип объекта, состояние/дефект). Сначала пробуем грамматику ДСС, затем общий формат."""
+    dss = DSS_LABELS.get(_dss_key(label))
+    if dss is not None:
+        return dss
     if "/" in label:
         t, _, d = label.partition("/")
         return t.strip(), d.strip()
@@ -58,10 +79,12 @@ def match_table(df, names: list[str]) -> dict[str, dict]:
     for col in df:
         hits = {hit(v) for v in df[col]} - {None}
         explicit = {str(v).strip().replace("\\", "/").casefold() for v in df[col]} & exact.keys()
-        scores[col] = (len(hits), len(explicit))
-    best = max(scores.values(), default=(0, 0))
+        # Колонка, в которой лежат имена с расширением фото, — это колонка файла, а не ID.
+        ext_like = sum(1 for v in df[col] if Path(str(v).strip()).suffix.lower() in IMG_EXT)
+        scores[col] = (ext_like, len(explicit), len(hits))
+    best = max(scores.values(), default=(0, 0, 0))
     columns = [col for col, score in scores.items() if score == best]
-    if not best[0] or len(columns) != 1:
+    if not best[2] or len(columns) != 1:
         print("Таблица: не удалось однозначно определить колонку имени фото")
         return {}
     col = columns[0]
@@ -79,11 +102,16 @@ def match_table(df, names: list[str]) -> dict[str, dict]:
     return result
 
 
+NON_DESC_COLS = {"группа", "group", "id объекта", "object_id", "lat", "lon", "latitude", "longitude"}
+
+
 def description_column(rows: list[dict]) -> str | None:
-    """Колонка описания — текстовая с самой большой средней длиной."""
+    """Колонка описания — текстовая с самой большой средней длиной (кроме служебных ID/группы/координат)."""
     lens = Counter()
     for r in rows:
         for k, v in r.items():
+            if str(k).strip().casefold() in NON_DESC_COLS:
+                continue
             if isinstance(v, str):
                 lens[k] += len(v)
     return lens.most_common(1)[0][0] if lens else None

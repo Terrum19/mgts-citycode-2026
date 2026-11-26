@@ -16,6 +16,7 @@
 import argparse
 import csv
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -24,6 +25,7 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import variants  # noqa: E402
+from asset import enrich_result, load_registry  # noqa: E402
 from draw import annotate  # noqa: E402
 from run import load_config  # noqa: E402
 
@@ -32,6 +34,36 @@ IMG_EXT = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
 def names_ru(cfg: dict) -> dict:
     return cfg.get("names", {})
+
+
+def exif_gps(path: Path) -> dict:
+    """Широта/долгота из EXIF. Пустой dict, если GPS нет или координаты некорректны:
+    точку (0, 0) и мусор не подставляем."""
+    try:
+        with Image.open(path) as im:
+            gps = im.getexif().get_ifd(0x8825)
+    except Exception:
+        return {}
+    if not gps:
+        return {}
+
+    def to_deg(value) -> float | None:
+        try:
+            deg, minutes, seconds = (float(v) for v in value)
+        except Exception:
+            return None
+        return deg + minutes / 60 + seconds / 3600
+
+    lat, lon = to_deg(gps.get(2) or ()), to_deg(gps.get(4) or ())
+    if lat is None or lon is None:
+        return {}
+    if str(gps.get(1, "N")).strip().upper().startswith("S"):
+        lat = -lat
+    if str(gps.get(3, "E")).strip().upper().startswith("W"):
+        lon = -lon
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return {}
+    return {"lat": round(lat, 7), "lon": round(lon, 7)}
 
 
 def read_meta(path: Path) -> list[dict]:
@@ -55,16 +87,52 @@ def index_meta(rows: list[dict], files: list[str]) -> dict[str, dict]:
     return match_table(pd.DataFrame(rows), files)
 
 
+def photo_keys(paths: list[Path]) -> dict[Path, str]:
+    """Стабильный ключ фото: путь относительно общего корня. Имена файлов в выдаче повторяются
+    между папками, поэтому ключ по одному имени склеил бы разные объекты."""
+    if not paths:
+        return {}
+    root = Path(os.path.commonpath([str(p) for p in paths]))
+    root = root if root.is_dir() else root.parent
+    keys = {}
+    for p in paths:
+        try:
+            keys[p] = p.relative_to(root).as_posix()
+        except ValueError:
+            keys[p] = p.name
+    return keys
+
+
 def object_rows(file: str, pred: dict, meta: dict, names: dict) -> list[dict]:
-    ours = {"file", "object_n", "type", "type_ru", "status", "damage", "damage_ru", "description", "bbox", "object_id"}
+    ours = {"file", "object_n", "type", "type_ru", "status", "damage", "damage_ru", "description", "bbox", "object_id",
+            "scope", "asset_id", "identity_status", "identity_source", "registry_status",
+            "registry_lat", "registry_lon", "registry_address", "coords_source", "photo_lat", "photo_lon",
+            "functional_effect", "recommendation", "urgency", "assessment_basis"}
     meta = {("meta_" + k if k in ours else k): v for k, v in meta.items()}  # не затирать колонки организаторов
+    asset = pred.get("asset") or {}
+    assessment = pred.get("assessment") or {}
     rows = []
     for k, o in enumerate(pred["objects"], 1):
         rows.append({"file": file, "object_n": k, **meta,
                      "object_id": o.get("object_id", ""), "type": o["type"], "type_ru": names.get(o["type"], o["type"]),
                      "status": o["status"], "damage": o["damage"] or "",
                      "damage_ru": names.get(o["damage"], o["damage"] or "") if o["status"] == "bad" else "",
-                     "description": o.get("description", ""), "bbox": " ".join(map(str, o["bbox"] or []))})
+                     "description": o.get("description", ""), "bbox": " ".join(map(str, o["bbox"] or [])),
+                     "scope": pred.get("scope", ""),
+                     "asset_id": asset.get("asset_id") or "",
+                     "identity_status": asset.get("identity_status", ""),
+                     "identity_source": asset.get("identity_source", ""),
+                     "registry_status": asset.get("registry_status", ""),
+                     "registry_lat": asset.get("lat") if asset.get("lat") is not None else "",
+                     "registry_lon": asset.get("lon") if asset.get("lon") is not None else "",
+                     "registry_address": asset.get("address") or "",
+                     "coords_source": asset.get("coords_source", ""),
+                     "photo_lat": asset.get("photo_lat") if asset.get("photo_lat") is not None else "",
+                     "photo_lon": asset.get("photo_lon") if asset.get("photo_lon") is not None else "",
+                     "functional_effect": assessment.get("effect", ""),
+                     "recommendation": assessment.get("recommendation", ""),
+                     "urgency": assessment.get("urgency", ""),
+                     "assessment_basis": assessment.get("basis", "")})
     return rows
 
 
@@ -100,8 +168,9 @@ def read_boxes(path):
 
 
 def run(model, paths: list[Path], meta: dict, names: dict, out: Path | None = None, workers: int = 2,
-        on_done=None, boxes=None) -> tuple[list[dict], dict]:
+        on_done=None, boxes=None, registry: dict | None = None) -> tuple[list[dict], dict]:
     """Общая функция для CLI и интерфейса -> (строки объектов, сырые предсказания)."""
+    keys = photo_keys(paths)
     if out:
         (out / "annotated").mkdir(parents=True, exist_ok=True)
 
@@ -121,15 +190,19 @@ def run(model, paths: list[Path], meta: dict, names: dict, out: Path | None = No
                 if any(o["bbox"][2] > img.width or o["bbox"][3] > img.height for o in supplied):
                     raise ValueError(f"Рамка за пределами фото: {p.name}")
                 pred = model.predict(img, boxes=supplied)
+            pred = enrich_result(pred, meta=meta.get(keys[p]) or meta.get(p.name) or {}, registry=registry)
             if out:
-                annotate(img, pred["objects"], names=names).save(out / "annotated" / (p.stem + ".jpg"), quality=88)
+                target = (out / "annotated" / keys[p]).with_suffix(".jpg")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                annotate(img, pred["objects"], names=names, frame=pred).save(target, quality=88)
         return p, pred
 
     rows, preds = [], {}
     with ThreadPoolExecutor(workers) as ex:
         for k, (p, pred) in enumerate(ex.map(one, paths), 1):
-            preds[p.name] = pred
-            rows += object_rows(p.name, pred, meta.get(p.name, {}), names)
+            key = keys[p]
+            preds[key] = pred
+            rows += object_rows(key, pred, meta.get(key) or meta.get(p.name) or {}, names)
             if on_done:
                 on_done(k, len(paths), p, pred)
     return rows, preds
@@ -143,6 +216,7 @@ def main() -> None:
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int)
     ap.add_argument("--boxes", type=Path, help="рамки организатора или preds.json предыдущего запуска det_dino")
+    ap.add_argument("--registry", type=Path, help="CSV/XLSX/JSONL реестр: asset_id, lat, lon, address")
     args = ap.parse_args()
     cfg = load_config()
     names = names_ru(cfg)
@@ -151,9 +225,14 @@ def main() -> None:
     boxes = read_boxes(args.boxes) if args.boxes else None
 
     src = Path(args.images)
-    paths = sorted(p for p in src.iterdir() if p.suffix.lower() in IMG_EXT) if src.is_dir() else [src]
+    if src.is_dir():
+        paths = sorted(p for p in src.rglob("*") if p.is_file() and p.suffix.lower() in IMG_EXT)
+    else:
+        paths = [src]
     paths = paths[:args.limit] if args.limit else paths
-    meta = index_meta(read_meta(Path(args.meta)), [p.name for p in paths]) if args.meta else {}
+    keys = photo_keys(paths)
+    meta = index_meta(read_meta(Path(args.meta)), list(keys.values())) if args.meta else {}
+    registry = load_registry(read_meta(args.registry)) if args.registry else None
     model = variants.make(args.variant, cfg)
     out = Path(args.out)
 
@@ -162,7 +241,7 @@ def main() -> None:
         flag = f"ERR {pred['error'][:80]}" if pred["error"] else f"{len(pred['objects'])} obj, bad {bad}"
         print(f"  {k}/{n} {p.name}: {flag} {pred['seconds']}s", file=sys.stderr)
 
-    rows, preds = run(model, paths, meta, names, out, model.workers, progress, boxes)
+    rows, preds = run(model, paths, meta, names, out, model.workers, progress, boxes, registry)
     write_csv(out / "objects.csv", rows)
     repair = [r for r in rows if r["status"] == "bad"]
     write_csv(out / "repair.csv", repair)
